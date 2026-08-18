@@ -600,6 +600,8 @@ SKILL_UPDATE_CHECK_URL = (
     "https://connect.qq.com/skills/tencent-channel-community.zip"
 )
 
+# 官方 tencent-channel-community Skill 版本，来源为 SKILL.md frontmatter version。
+# 升级官方 Skill 后需手动同步此处，否则 /txcm status 的版本比对结果会失真。
 SKILL_VERSION = "1.1.5"
 
 
@@ -625,6 +627,31 @@ def _json_dumps(data: Any, limit: int = 4000) -> str:
 
 def _normalize_tool_name(name: str) -> str:
     return str(name or "").strip().replace("-", "_")
+_RATE_LIMIT_MARKERS = (
+    "请求频率过高",
+    "频率限制",
+    "频率受限",
+    "接口调用已超过申请的频率上限",
+    "too many requests",
+    "rate limit",
+    "rate-limited",
+)
+
+
+def _is_rate_limit_payload(parsed: Any) -> bool:
+    """判断 MCP tool 错误是否为 retCode 153 限流，尽量减少误判。"""
+    if isinstance(parsed, dict):
+        if str(parsed.get("code") or "") == "153":
+            return True
+        message = parsed.get("message")
+        if isinstance(message, dict):
+            text = json.dumps(message, ensure_ascii=False)
+        else:
+            text = str(message or parsed or "")
+    else:
+        text = str(parsed or "")
+    lower = text.lower()
+    return any(marker in lower for marker in _RATE_LIMIT_MARKERS)
 
 
 def _parse_json_text(text: str, *, fallback: Any = None) -> Any:
@@ -1013,7 +1040,7 @@ class TencentChannelCommunityPlugin(Star):
 
         if code == "8011" or "未登录" in text or "token" in text.lower():
             return "腾讯频道鉴权失败，请使用 /txcm login 重新授权，或用 /txcm token 写入有效 Token。"
-        if code == "153" or "频率" in text or "rate" in text.lower():
+        if _is_rate_limit_payload(parsed):
             return "腾讯频道接口触发频率限制，请等待约 70 秒后重试。"
         if code == "20047" or "需要加入" in text or "加入后" in text:
             return "该频道需要先加入才能浏览，请用 search_guild_content 找到并加入频道后重试。"
@@ -1076,15 +1103,8 @@ class TencentChannelCommunityPlugin(Star):
             return self._extract_tool_result(response)
 
     def _is_rate_limit_error(self, exc: TencentChannelError) -> bool:
-        """判断是否为 retCode 153 限流错误。"""
-        code = ""
-        data = getattr(exc, "data", None)
-        if isinstance(data, dict):
-            parsed_code = data.get("code")
-            if parsed_code is not None:
-                code = str(parsed_code)
-        text = str(exc)
-        return code == "153" or "频率" in text or "rate" in text.lower()
+        """判断异常是否为限流错误，复用 _is_rate_limit_payload 保持一致。"""
+        return _is_rate_limit_payload(getattr(exc, "data", None)) or _is_rate_limit_payload(str(exc))
     def _extract_guilds(self, data: Any) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
 
@@ -1206,8 +1226,12 @@ class TencentChannelCommunityPlugin(Star):
                 if latest:
                     result["latest_version"] = latest
                     result["update_available"] = latest != SKILL_VERSION
+                else:
+                    result["error"] = "响应缺少 x-cos-meta-tcc-version 头"
+                    result["error_hint"] = "官方版本检测失败（响应缺少版本信息），如需详情请查看日志。"
         except Exception as exc:
             result["error"] = str(exc)
+            result["error_hint"] = f"官方版本检测失败：{type(exc).__name__}，如需详情请查看日志。"
         return result
 
     def _resolve_cli_command_key(self, command: str) -> str:
@@ -1770,7 +1794,8 @@ class TencentChannelCommunityPlugin(Star):
                 tag = "（有新版）" if skill.get("update_available") else "（最新）"
                 lines.append(f"Skill 版本：当前 {current}，官方 {latest} {tag}")
             else:
-                lines.append(f"Skill 版本：当前 {current}，官方版本检测失败")
+                hint = skill.get("error_hint") or skill.get("error") or "未知原因"
+                lines.append(f"Skill 版本：当前 {current}，官方版本检测失败（{hint}）")
         yield event.plain_result("\n".join(lines))
 
     @txcm.custom_filter(filter.PermissionTypeFilter, filter.PermissionType.ADMIN)

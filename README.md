@@ -90,7 +90,7 @@ https://github.com/piexian/astrbot_plugin_tencent_channel_community
 
 | 工具 | 说明 |
 |------|------|
-| `txcm_status` | 检查 MCP 状态 |
+| `txcm_status` | 检查 MCP 状态与官方 Skill 版本更新 |
 | `txcm_list_tools` | 列出 MCP tools |
 | `txcm_get_tool_schema` | 查看 MCP tool schema |
 | `txcm_list_guilds` | 列出当前账号频道 |
@@ -123,9 +123,35 @@ https://github.com/piexian/astrbot_plugin_tencent_channel_community
 ## CLI 对齐范围
 
 - `feed` / `manage` 原子命令映射到 MCP tool，可用 `/txcm map <domain.action>` 查询。
-- CLI 快捷命令会拆成原子 MCP tool 组合，不维护 CLI 本地交互状态。
+- CLI 快捷命令会拆成原子 MCP tool 组合，不维护 CLI resume 状态机。
 - 图片/视频上传涉及动态上传地址和分片协议，当前保留 MCP 原子工具和接口参考。
+- CLI 的 `--ref` 通知编号机制依赖本地通知存储，插件侧需手动传入 feed_id/comment_id 等参数。
 
+## Skill Guide Topics
+
+`/txcm guide [topic]` 和 `txcm_skill_guide` 工具支持以下 topic：
+
+| Topic | 说明 |
+|-------|------|
+| `login` | 登录与 Token 管理 |
+| `risk` | 高风险工具与写操作权限 |
+| `error_codes` | retCode 错误码表（8011/153/20047/130000/20006/100707） |
+| `cli` | CLI 命令与 MCP tool 映射 |
+| `endpoint` | 接口端点规则 |
+| `guild` | 频道管理 |
+| `member` | 成员操作、tiny_id、禁言 |
+| `feed` | 帖子操作 |
+| `feed_type` | 短贴/长贴类型、字数与媒体限制 |
+| `markdown` | Markdown 发帖规则 |
+| `inline` | 内联链接与 @语法 |
+| `pagination` | 翻页字段名差异 |
+| `alter_feed` | 编辑帖子媒体替换 |
+| `del_reply` | 删除回复必填字段 |
+| `join_guild` | 加入频道 7 种验证类型 |
+| `dm` | 频道私信双模式 |
+| `share_url` | 分享链接规则 |
+| `notification` | 通知操作与插件限制 |
+| `shortcut` | 快捷命令的原子组合方式 |
 ## 项目结构
 
 ```text

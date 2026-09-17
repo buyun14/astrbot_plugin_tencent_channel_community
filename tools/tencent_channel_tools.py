@@ -42,8 +42,10 @@ class TencentChannelFunctionTool(FunctionTool):
                 return await self.plugin.tool_ask_channel(**kwargs)
             if self.name == "txcm_call_tool":
                 return await self.plugin.tool_call_tool(**kwargs)
-            if self.name == "txcm_skill_guide":
-                return await self.plugin.tool_skill_guide(**kwargs)
+            if self.name == "txcm_skill_topics":
+                return await self.plugin.tool_skill_topics()
+            if self.name == "txcm_skill_read":
+                return await self.plugin.tool_skill_read(**kwargs)
             if self.name == "txcm_list_cli_commands":
                 return await self.plugin.tool_list_cli_commands(**kwargs)
             if self.name == "txcm_get_cli_mapping":

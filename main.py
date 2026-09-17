@@ -5,6 +5,7 @@ import base64
 import datetime
 import json
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -15,7 +16,7 @@ from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
 
 from . import channel_data as cdata
-from . import mcp_protocol
+from . import mcp_protocol, skill_source
 from .cli_reference import CLI_COMMANDS, ENDPOINT_GUIDE
 from .constants import (
     CONFIG_DEFAULTS,
@@ -27,7 +28,7 @@ from .constants import (
 from .device_login import DeviceLoginMixin
 from .errors import TencentChannelError
 from .mcp_client import McpClientMixin
-from .skill_guide import skill_guide_text
+from .skill_guide import SECTIONS, skill_guide_text
 from .tools import TencentChannelFunctionTool
 from .tools.schema import (
     boolean_param,
@@ -191,6 +192,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                 name="txcm_call_tool",
                 description=(
                     "调用腾讯频道 MCP 原始工具。arguments_json 必须是 JSON object 字符串。"
+                    "鉴权由插件自动处理：8011/130001=接口或工具不存在，151=登录态失效需 /txcm login。"
                     "写操作和高风险操作受插件配置开关限制。"
                 ),
                 parameters=object_parameters(
@@ -205,14 +207,22 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                 plugin=self,
             ),
             TencentChannelFunctionTool(
-                name="txcm_skill_guide",
-                description="读取内置腾讯频道 Skill 使用规则，帮助模型选择工具和控制风险。",
+                name="txcm_skill_topics",
+                description="列出可检索的腾讯频道官方 Skill 主题与插件踩坑附录主题。",
+                parameters=object_parameters({}),
+                plugin=self,
+            ),
+            TencentChannelFunctionTool(
+                name="txcm_skill_read",
+                description=(
+                    "按主题读取腾讯频道官方 Skill 内容（overview/feed/manage-guild/"
+                    "manage-member/notification）或插件踩坑附录（txcm- 前缀主题）。"
+                    "官方文档面向 CLI 命令，插件内用 txcm_call_cli_command 等价执行。"
+                    "先调 txcm_skill_topics 获取主题列表。"
+                ),
                 parameters=object_parameters(
-                    {
-                        "topic": string_param(
-                            "可选。guild/member/feed/notification/risk/login/cli/endpoint/media/shortcut。"
-                        )
-                    }
+                    {"topic": string_param("主题名，来自 txcm_skill_topics。")},
+                    required=["topic"],
                 ),
                 plugin=self,
             ),
@@ -242,6 +252,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                 description=(
                     "按 CLI 命令名定位 MCP tool 并调用。arguments_json 必须是对应 MCP tool schema 的 "
                     "JSON object 字符串，写操作和高风险操作受插件配置开关限制。"
+                    "鉴权由插件自动处理：8011/130001=接口或工具不存在，151=登录态失效需 /txcm login。"
                 ),
                 parameters=object_parameters(
                     {
@@ -391,6 +402,15 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
             except TencentChannelError as exc:
                 payload["credential_probe"] = f"failed: {exc}"
         payload["skill_update"] = await self._check_skill_update()
+        skill_cache = self._skill_cache_dir()
+        if skill_cache is not None:
+            manifest = skill_source.load_manifest(skill_cache)
+            payload["skill_update"]["cached_version"] = (
+                manifest.get("version") if manifest else None
+            )
+            payload["skill_update"]["official_topics"] = sorted(
+                skill_source.official_topics(skill_cache)
+            )
         return payload
 
     def _resolve_cli_command_key(self, command: str) -> str:
@@ -870,8 +890,65 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         result = await self.call_mcp_tool(tool_name, arguments)
         return _json_dumps(result)
 
-    async def tool_skill_guide(self, topic: str = "") -> str:
-        return skill_guide_text(topic)
+    def _skill_cache_dir(self) -> Path | None:
+        """官方 Skill 缓存目录；定位失败时返回 None，仅保留内置踩坑附录。"""
+        try:
+            from astrbot.api.star import StarTools
+
+            return Path(StarTools.get_data_dir(PLUGIN_NAME)) / "skill"
+        except Exception:
+            pass
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+            return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "skill"
+        except Exception:
+            return None
+
+    async def _ensure_skill_source(self, *, force: bool = False) -> dict[str, Any]:
+        cache_dir = self._skill_cache_dir()
+        if cache_dir is None:
+            return {"error": "无法定位插件数据目录，官方 Skill 缓存不可用"}
+        session = await self._get_session()
+        proxy = str(self._cfg("proxy", "") or "").strip() or None
+        return await skill_source.refresh_skill_cache(
+            cache_dir, session, proxy, force=force
+        )
+
+    async def tool_skill_topics(self) -> str:
+        refresh = await self._ensure_skill_source()
+        cache_dir = self._skill_cache_dir()
+        official = skill_source.official_topics(cache_dir) if cache_dir else {}
+        return _json_dumps(
+            {
+                "official": [
+                    {"topic": topic, **meta} for topic, meta in official.items()
+                ],
+                "appendix": [f"txcm-{key}" for key in SECTIONS],
+                "cached_version": refresh.get("cached_version"),
+                "refresh_error": refresh.get("error"),
+            }
+        )
+
+    async def tool_skill_read(self, topic: str) -> str:
+        key = str(topic or "").strip()
+        if not key:
+            return "topic 不能为空。先调 txcm_skill_topics 获取主题列表。"
+        await self._ensure_skill_source()
+        cache_dir = self._skill_cache_dir()
+        if cache_dir is not None and key in skill_source.OFFICIAL_TOPICS:
+            text = skill_source.read_official_topic(cache_dir, key)
+            if text:
+                return text
+        appendix_key = key[5:] if key.startswith("txcm-") else key
+        if appendix_key in SECTIONS:
+            return f"[来源: plugin appendix] {skill_guide_text(appendix_key)}"
+        if cache_dir is None:
+            return (
+                f"主题 {key} 暂不可用：官方 Skill 缓存不可用，"
+                "且不是内置附录主题。可用主题见 txcm_skill_topics。"
+            )
+        return f"未知主题 {key}。可用主题见 txcm_skill_topics。"
 
     async def tool_list_cli_commands(self, query: str = "") -> str:
         keyword = str(query or "").strip().lower()
@@ -943,7 +1020,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
             "/txcm list - 列出已加入频道\n"
             "/txcm call <工具名> <JSON> - 调用原始 MCP 工具\n"
             "/txcm ccall <domain.action> <JSON> - 按 CLI 命令名调用 MCP 工具\n"
-            "/txcm guide [topic] - 查看内置 Skill 指导"
+            "/txcm guide [topic] - 查看官方 Skill 与踩坑附录"
         )
 
     @filter.command_group("txcm")
@@ -1246,5 +1323,26 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         event: AstrMessageEvent,
         topic: GreedyStr = "",
     ) -> AsyncGenerator[MessageEventResult, None]:
-        """查看内置 Skill 指导。"""
-        yield event.plain_result(skill_guide_text(str(topic or "")))
+        """查看官方 Skill 与踩坑附录。"""
+        key = str(topic or "").strip()
+        if not key:
+            yield event.plain_result(await self.tool_skill_topics())
+            return
+        yield event.plain_result(await self.tool_skill_read(key))
+
+    @txcm.command("skill_update")
+    async def txcm_skill_update(
+        self,
+        event: AstrMessageEvent,
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """手动刷新官方 Skill 缓存。"""
+        refresh = await self._ensure_skill_source(force=True)
+        cached = refresh.get("cached_version") or "无"
+        if refresh.get("error"):
+            yield event.plain_result(
+                f"官方 Skill 更新失败：{refresh['error']}（缓存版本：{cached}）"
+            )
+            return
+        yield event.plain_result(
+            f"官方 Skill 缓存版本：{cached}（线上最新：{refresh.get('latest_version') or '未知'}）"
+        )

@@ -10,11 +10,16 @@
    否则会随 AstrBot 的未捕获异常日志一起落盘。
 3. **失败分类**——区分"值得重试的瞬时抖动"和"重试无意义的确定性错误"
    （如工具名拼错导致的 ``api info not exist``）。
+4. **报文文本解析与工具名归一化**——MCP 把业务数据塞在 ``message(...)`` 这类
+   "JSON 字符串套在文本里"的载荷中，解析失败必须原样返回而不是抛异常；
+   工具名在外部可能写成连字符形式，调用前统一归一化成下划线。
 """
 
 from __future__ import annotations
 
+import json
 import re
+from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 TOKEN_QUERY_KEY = "token"
@@ -127,3 +132,36 @@ def build_mcp_headers(
     if token and with_authorization:
         headers["Authorization"] = f"Bearer {token}"
     return headers
+
+
+def parse_json_text(text: str, fallback: Any = None) -> Any:
+    """把文本解析成 JSON，空串或解析失败时返回 ``fallback``。
+
+    Args:
+        text: 待解析文本。
+        fallback: 解析失败时的返回值。
+
+    Returns:
+        解析结果或 ``fallback``。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return fallback
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return fallback
+
+
+def normalize_tool_name(name: str) -> str:
+    """把工具名归一化成下划线形式。
+
+    网关工具名用下划线，CLI 风格的命令名常用连字符，调用方两种都可能传。
+
+    Args:
+        name: 原始工具名。
+
+    Returns:
+        归一化后的工具名。
+    """
+    return str(name or "").strip().replace("-", "_")

@@ -8,7 +8,8 @@
         "type": "string",
         "description": "QQ AI Connect Token",
         "hint": "不要带 Bearer 前缀。为空时只能列出工具，不能调用账号相关能力。",
-        "default": ""
+        "default": "",
+        "secret": true
       }
     }
   },

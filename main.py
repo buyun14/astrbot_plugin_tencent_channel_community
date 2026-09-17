@@ -8,7 +8,6 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import aiohttp
-
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger, sp
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
@@ -294,7 +293,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
             if changed:
                 perms_store["_default"] = defaults
                 await sp.global_put("tool_permissions", perms_store)
-        except Exception as exc:
+        except Exception as exc:  # 兜底告警，不阻断插件加载
             logger.warning(
                 f"[{PLUGIN_NAME}] failed to set default tool permissions: {exc}"
             )
@@ -950,7 +949,6 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
     @filter.command_group("txcm")
     def txcm(self):
         """腾讯频道社区管理工具指令组。"""
-        pass
 
     @txcm.custom_filter(filter.PermissionTypeFilter, filter.PermissionType.ADMIN)
     @txcm.command("help")
@@ -1064,7 +1062,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
             try:
                 base64.b64decode(qr_code, validate=False)
                 yield event.chain_result([Comp.Image.fromBase64(qr_code)])
-            except Exception:
+            except Exception:  # 兜底降级为文本提示，不中断登录输出
                 logger.warning(f"[{PLUGIN_NAME}] login qr_code is not valid base64")
         yield event.plain_result("\n".join(lines))
 

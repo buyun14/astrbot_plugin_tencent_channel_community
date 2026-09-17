@@ -222,11 +222,11 @@ def _heuristic_text(decoded: str) -> str:
     """朴素兜底：保留含中文的片段、纯数字片段和纯小写英文片段。"""
     kept: list[str] = []
     for run in _READABLE_RUN_RE.findall(decoded):
-        if _CJK_RE.search(run):
-            kept.append(run)
-        elif run.isdigit() and len(run) >= 2:
-            kept.append(run)
-        elif run.isalpha() and run.islower() and len(run) >= 3:
+        if (
+            _CJK_RE.search(run)
+            or (run.isdigit() and len(run) >= 2)
+            or (run.isalpha() and run.islower() and len(run) >= 3)
+        ):
             kept.append(run)
     if kept:
         return _join_parts(kept)

@@ -10,9 +10,9 @@ import base64
 import channel_data as cd
 
 # ---- 真实样本 -------------------------------------------------------------- #
-GUILD_NAME_B64 = "5ZCv57+U5rmW55WULeilv+WMl+W3peS4muWkp+Wtpg=="          # 启翔湖畔-西北工业大学
-CHANNEL_NAME_B64 = "5pGE5b2x5Yy6"                                        # 摄影区
-CHANNEL_NAME_B64_2 = "6ICD56CU5L+h5oGv"                                  # 考研信息
+GUILD_NAME_B64 = "5ZCv57+U5rmW55WULeilv+WMl+W3peS4muWkp+Wtpg=="  # 启翔湖畔-西北工业大学
+CHANNEL_NAME_B64 = "5pGE5b2x5Yy6"  # 摄影区
+CHANNEL_NAME_B64_2 = "6ICD56CU5L+h5oGv"  # 考研信息
 COMMENT_FULL = (
     "CioIARomCiTlnKjmuLjms7PmsaDopb/ovrnmnInkuIDmoIvlsI/mpbzph4wKDAgEMggKAzMxORIBMQ=="
 )
@@ -64,10 +64,22 @@ def test_decode_protobuf_text_keeps_plain_text():
 def test_first_text_handles_rich_structures():
     assert cd.first_text("简单字符串") == "简单字符串"
     assert (
-        cd.first_text({"contents": [{"type": 1, "textContent": {"text": "体育馆西侧"}}]})
+        cd.first_text(
+            {"contents": [{"type": 1, "textContent": {"text": "体育馆西侧"}}]}
+        )
         == "体育馆西侧"
     )
-    assert cd.first_text({"contents": [{"type": 1, "textContent": {"text": "上"}}, {"type": 1, "textContent": {"text": "课"}}]}) == "上 课"
+    assert (
+        cd.first_text(
+            {
+                "contents": [
+                    {"type": 1, "textContent": {"text": "上"}},
+                    {"type": 1, "textContent": {"text": "课"}},
+                ]
+            }
+        )
+        == "上 课"
+    )
     assert cd.first_text(None) == ""
     assert cd.first_text({"unknown": 1}) == ""
 
@@ -107,9 +119,7 @@ def _varint_field(field_no: int, value: int) -> bytes:
 
 def _node(node_type: int, payload: bytes) -> bytes:
     """一个富文本节点：``#1 = {#1: 类型, #(类型+2): 载荷}``。"""
-    return _field(
-        1, _varint_field(1, node_type) + _field(node_type + 2, payload)
-    )
+    return _field(1, _varint_field(1, node_type) + _field(node_type + 2, payload))
 
 
 def _text_node(text: str) -> bytes:
@@ -199,9 +209,7 @@ def test_decode_comment_content_annotates_mentions():
     raw = _text_node("谢谢") + _mention_node("100000000000000001", "某同学")
     parsed = cd.decode_comment_content(_b64(raw))
     assert parsed.body == "谢谢[@某同学]"
-    assert parsed.mentions == [
-        {"tiny_id": "100000000000000001", "name": "某同学"}
-    ]
+    assert parsed.mentions == [{"tiny_id": "100000000000000001", "name": "某同学"}]
 
 
 def test_decode_comment_content_keeps_entities_in_order():
@@ -314,7 +322,9 @@ def test_normalize_comment_exposes_location_and_entities():
 
 
 def test_normalize_channel_decodes_name():
-    assert cd.normalize_channel({"channelId": "652774337", "channelName": CHANNEL_NAME_B64}) == {
+    assert cd.normalize_channel(
+        {"channelId": "652774337", "channelName": CHANNEL_NAME_B64}
+    ) == {
         "channel_id": "652774337",
         "name": "摄影区",
     }
@@ -338,21 +348,31 @@ def test_extract_guilds_from_real_envelope():
 
 def test_extract_channels_and_feeds_and_comments():
     channels = cd.extract_channels(
-        {"guildInfoList": [{"channelList": [{"channelId": "1", "channelName": CHANNEL_NAME_B64}]}]}
+        {
+            "guildInfoList": [
+                {"channelList": [{"channelId": "1", "channelName": CHANNEL_NAME_B64}]}
+            ]
+        }
     )
     assert [c["channelId"] for c in channels] == ["1"]
 
     feeds = cd.extract_feeds(
         {
             "feeds": [
-                {"id": "f1", "createTime": 1, "contents": [{"type": 1, "textContent": {"text": "hi"}}]},
+                {
+                    "id": "f1",
+                    "createTime": 1,
+                    "contents": [{"type": 1, "textContent": {"text": "hi"}}],
+                },
                 {"not_a_feed": True},
             ]
         }
     )
     assert [f["id"] for f in feeds] == ["f1"]
 
-    comments = cd.extract_comments({"vecComment": [{"postUser": {"nick": "a"}, "content": "x"}]})
+    comments = cd.extract_comments(
+        {"vecComment": [{"postUser": {"nick": "a"}, "content": "x"}]}
+    )
     assert len(comments) == 1
 
     assert cd.extract_comments({"vecComment": []}) == []

@@ -20,7 +20,6 @@ import time
 from typing import Any
 
 import aiohttp
-
 from astrbot.api import logger
 
 from . import mcp_protocol
@@ -130,7 +129,7 @@ class McpClientMixin:
             raise TencentChannelError(
                 mcp_protocol.redact_token(f"请求腾讯频道端点失败: {exc}", token)
             ) from exc
-        except Exception as exc:  # noqa: BLE001 - 兜底脱敏，避免 token 随异常日志落盘
+        except Exception as exc:  # 非 HTTP 异常同样脱敏后抛出，避免 token 落盘
             raise TencentChannelError(
                 mcp_protocol.redact_token(
                     f"请求腾讯频道端点异常: {type(exc).__name__}: {exc}", token
@@ -574,7 +573,7 @@ class McpClientMixin:
                     result["error_hint"] = (
                         "官方版本检测失败（响应缺少版本信息），如需详情请查看日志。"
                     )
-        except Exception as exc:
+        except Exception as exc:  # 兜底写入结果字段，不向外抛出
             result["error"] = str(exc)
             result["error_hint"] = (
                 f"官方版本检测失败：{type(exc).__name__}，如需详情请查看日志。"

@@ -1,10 +1,9 @@
 import json
 from typing import Any
 
-from pydantic.dataclasses import dataclass
-
 from astrbot.api import logger
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
+from pydantic.dataclasses import dataclass
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -61,7 +60,7 @@ class TencentChannelFunctionTool(FunctionTool):
                 },
                 ensure_ascii=False,
             )
-        except Exception as exc:
+        except Exception as exc:  # 兜底返回错误 JSON，不向调用方抛出
             logger.warning(f"[txcm] tool {self.name} failed: {exc}")
             return json.dumps(
                 {

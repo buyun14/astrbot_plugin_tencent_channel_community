@@ -10,9 +10,9 @@ import asyncio
 import importlib
 import pathlib
 import sys
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from urllib.parse import parse_qs, urlsplit
 
 pytest.importorskip("astrbot")
 
@@ -70,9 +70,14 @@ def test_initialize_sends_notification_and_never_uses_authorization_header():
 
     asyncio.run(inst._initialize_mcp())
 
-    assert [method for method, _, _ in calls] == ["initialize", "notifications/initialized"]
+    assert [method for method, _, _ in calls] == [
+        "initialize",
+        "notifications/initialized",
+    ]
     for method, url, headers in calls:
-        assert parse_qs(urlsplit(url).query)["token"] == [TOKEN], f"{method} 必须把 token 放在 query"
+        assert parse_qs(urlsplit(url).query)["token"] == [TOKEN], (
+            f"{method} 必须把 token 放在 query"
+        )
         assert "Authorization" not in headers, f"{method} 不能带 Authorization 头"
 
 
@@ -118,7 +123,12 @@ def test_transient_failure_is_retried_then_succeeds():
         attempts["count"] += 1
         if attempts["count"] == 1:
             raise main.TencentChannelError("请求腾讯频道端点超时。")
-        return {"result": {"isError": False, "content": [{"type": "text", "text": "code(0):0"}]}}
+        return {
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "code(0):0"}],
+            }
+        }
 
     inst._post_json = fake_post
     parsed = asyncio.run(inst.call_mcp_tool("get_guild_feeds", {"guildId": "1"}))
@@ -140,7 +150,12 @@ def test_non_retryable_error_is_not_retried():
         return {
             "result": {
                 "isError": True,
-                "_meta": {"AdditionalFields": {"retCode": 130001, "errMsg": "api info not exist"}},
+                "_meta": {
+                    "AdditionalFields": {
+                        "retCode": 130001,
+                        "errMsg": "api info not exist",
+                    }
+                },
                 "content": [{"type": "text", "text": "code(130001):130001"}],
             }
         }

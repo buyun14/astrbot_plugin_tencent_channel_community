@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 import uuid
@@ -170,10 +171,8 @@ class DeviceLoginMixin:
             status = str(data.get("status") or "").lower()
             next_interval = data.get("interval")
             if next_interval:
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     interval = int(next_interval)
-                except (TypeError, ValueError):
-                    pass
             token = self._extract_login_token(data)
             if token:
                 self._set_cfg("qq_ai_connect_token", token)

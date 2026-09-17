@@ -52,7 +52,9 @@ def test_transient_classification_matches_real_messages():
     # 这些文案来自 main.py 的 _post_json，必须被判为可重试
     assert mp.is_transient_mcp_failure("腾讯频道接口触发频率限制，请稍后再试。")
     assert mp.is_transient_mcp_failure("请求腾讯频道端点超时。")
-    assert mp.is_transient_mcp_failure("请求腾讯频道端点失败: Cannot connect to host ...")
+    assert mp.is_transient_mcp_failure(
+        "请求腾讯频道端点失败: Cannot connect to host ..."
+    )
     assert mp.is_transient_mcp_failure("腾讯频道端点返回 HTTP 502。")
     assert mp.is_transient_mcp_failure("151 [oidb]登录态验证失败")
 
@@ -62,4 +64,6 @@ def test_non_retryable_classification():
     assert not mp.is_transient_mcp_failure(
         '腾讯频道 MCP 工具返回错误：{"message":"api info not exist","retcode":130001}'
     )
-    assert not mp.is_transient_mcp_failure("腾讯频道鉴权失败，请检查 QQ AI Connect Token")
+    assert not mp.is_transient_mcp_failure(
+        "腾讯频道鉴权失败，请检查 QQ AI Connect Token"
+    )

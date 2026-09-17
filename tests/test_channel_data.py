@@ -79,11 +79,14 @@ def test_as_int_is_lenient():
     assert cd.as_int(None) == 0
 
 
-# ---- 评论正文 / IP 属地 ------------------------------------------------------ #
+# ---- 评论正文 / IP 属地 / 实体 ----------------------------------------------- #
 # fixture 按真实抓包的结构构造（可见文本做了替换，字段号与嵌套关系保持一致）：
-#   顶层 #1（可重复）= 一个富文本节点，节点内 #3 → #3.1 才是文本字符串
+#   顶层 #1（可重复）= 一个富文本节点，节点内 #1 = 类型、#(类型+2) = 载荷
+#       类型 1 → #3 → #3.1 = 文本
+#       类型 2 → #4 = {tiny_id, name}   @提及
+#       类型 3 → #5 = {url, title}      链接卡片
+#       类型 4 → #6 = {id, type}        表情（type: 1=系统表情 2=emoji）
 #   顶层 #4 = IP 属地
-#   节点类型 3 / 4 分别是链接卡片与实体（表情）节点，载荷在 #5 / #6，不是正文
 def _varint(value: int) -> bytes:
     out = b""
     while True:
@@ -102,25 +105,31 @@ def _varint_field(field_no: int, value: int) -> bytes:
     return _varint(field_no << 3) + _varint(value)
 
 
-def _text_node(text: str) -> bytes:
-    """type=1 富文本节点：``#1 → #3 → #3.1 = 文本``。"""
-    return _field(1, _varint_field(1, 1) + _field(3, _field(1, text.encode())))
-
-
-def _face_node(face_id: str) -> bytes:
-    """type=4 实体节点（表情）：载荷是 ``#6 = {1: id, 2: '1'}``，不是正文。"""
+def _node(node_type: int, payload: bytes) -> bytes:
+    """一个富文本节点：``#1 = {#1: 类型, #(类型+2): 载荷}``。"""
     return _field(
-        1,
-        _varint_field(1, 4) + _field(6, _field(1, face_id.encode()) + _field(2, b"1")),
+        1, _varint_field(1, node_type) + _field(node_type + 2, payload)
     )
+
+
+def _text_node(text: str) -> bytes:
+    """type=1 文本节点：``#1 → #3 → #3.1 = 文本``。"""
+    return _node(1, _field(1, text.encode()))
+
+
+def _face_node(face_id: str, face_type: str = "1") -> bytes:
+    """type=4 表情节点：``#6 = {1: id, 2: EmojiType}``。"""
+    return _node(4, _field(1, face_id.encode()) + _field(2, face_type.encode()))
 
 
 def _link_node(url: str, title: str) -> bytes:
-    """type=3 链接卡片节点：载荷是 ``#5 = {1: url, 2: 标题}``。"""
-    return _field(
-        1,
-        _varint_field(1, 3) + _field(5, _field(1, url.encode()) + _field(2, title.encode())),
-    )
+    """type=3 链接卡片节点：``#5 = {1: url, 2: 标题}``。"""
+    return _node(3, _field(1, url.encode()) + _field(2, title.encode()))
+
+
+def _mention_node(tiny_id: str, name: str) -> bytes:
+    """type=2 @提及节点：``#4 = {1: tiny_id, 2: 昵称}``。"""
+    return _node(2, _field(1, tiny_id.encode()) + _field(2, name.encode()))
 
 
 def _b64(data: bytes) -> str:
@@ -130,62 +139,90 @@ def _b64(data: bytes) -> str:
 def test_decode_comment_content_separates_ip_location():
     """顶层 #4 是 IP 属地，不能粘在正文末尾（真实抓包的回归点）。"""
     raw = _text_node("挂个") + _text_node("🪜") + _field(4, "陕西".encode())
-    body, location = cd.decode_comment_content(_b64(raw))
-    assert body == "挂个🪜"
-    assert location == "陕西"
+    parsed = cd.decode_comment_content(_b64(raw))
+    assert parsed.body == "挂个🪜"
+    assert parsed.location == "陕西"
 
 
 def test_decode_comment_content_keeps_emoji_only_segment():
     """只有 emoji 的节点也必须保留（它的字节能被误判成 varint 字段）。"""
-    body, location = cd.decode_comment_content(_b64(_text_node("🪜")))
-    assert body == "🪜"
-    assert location == ""
+    parsed = cd.decode_comment_content(_b64(_text_node("🪜")))
+    assert parsed.body == "🪜"
+    assert parsed.location == ""
 
 
-def test_decode_comment_content_ignores_entity_node_payload():
-    """type=4 实体（表情）的 id 不是正文——旧实现会把它拼进去。"""
-    raw = (
-        _text_node("我想要客户端的能教教吗")
-        + _face_node("63")
-        + _field(4, "陕西".encode())
-    )
-    body, location = cd.decode_comment_content(_b64(raw))
-    assert body == "我想要客户端的能教教吗"
-    assert "63" not in body
-    assert location == "陕西"
+def test_decode_comment_content_annotates_faces_in_place():
+    """表情不丢弃：按出现顺序内联成带标注形式，id 留在结构化字段里。"""
+    raw = _text_node("哈哈哈哈") + _face_node("277") + _text_node("太真实了")
+    parsed = cd.decode_comment_content(_b64(raw))
+    assert parsed.body == "哈哈哈哈[表情:汪汪]太真实了"
+    assert parsed.faces == [{"id": "277", "type": "1", "name": "汪汪"}]
 
 
-def test_decode_comment_content_entity_only_has_empty_body():
-    """整条评论只有一个表情时正文为空，且不能回退去把表情 id 当正文。"""
-    body, location = cd.decode_comment_content(_b64(_face_node("319") + _field(4, b"")))
-    assert body == ""
-    assert location == ""
+def test_decode_comment_content_uses_char_for_unicode_emoji():
+    """type=2 的 id 就是 Unicode 码点，直接还原真字符，不需要维护对照表。"""
+    parsed = cd.decode_comment_content(_b64(_face_node("128523", "2")))
+    assert parsed.body == "😋"
+    assert parsed.faces[0]["id"] == "128523"
+    assert parsed.faces[0]["type"] == "2"
 
 
-def test_decode_comment_content_drops_link_card_payloads():
-    """链接卡片（type=3）的 URL 与标题不进正文。
+def test_decode_comment_content_keeps_unknown_face_id():
+    """官方表情表只有部分表情：查不到名字时展示 id，绝不丢弃。"""
+    parsed = cd.decode_comment_content(_b64(_face_node("999999")))
+    assert parsed.body == "[表情:999999]"
+    assert parsed.faces == [{"id": "999999", "type": "1", "name": ""}]
 
-    卡片是实体节点，正文只取 type=1 节点的 ``#3``。旧实现会把 URL 和**被上游截断
-    的标题**一起拼进正文，读起来是「…事少分高推荐一下老八院的专业...」。如果以后
-    要把卡片标题还给模型，请另开结构化字段，不要拼回正文。
-    """
+
+def test_decode_comment_content_degrades_without_face_map(monkeypatch):
+    """名字表缺失时只退化成显示 id，不能报错、更不能丢实体。"""
+    monkeypatch.setattr(cd, "_face_maps", {})
+    parsed = cd.decode_comment_content(_b64(_face_node("277")))
+    assert parsed.body == "[表情:277]"
+    assert parsed.faces[0]["id"] == "277"
+
+
+def test_decode_comment_content_annotates_cards_without_url_in_body():
+    """卡片只把标题放进正文，url 留在结构化字段（长链接会污染检索）。"""
     raw = _text_node("推荐一下老八院") + _link_node(
-        "https://pd.qq.com/s/7epipxs6k", "《Triz创新理论及..."
+        "https://pd.qq.com/s/example", "某帖子标题"
     )
-    body, location = cd.decode_comment_content(_b64(raw))
-    assert body == "推荐一下老八院"
-    assert "pd.qq.com" not in body
-    assert location == ""
+    parsed = cd.decode_comment_content(_b64(raw))
+    assert parsed.body == "推荐一下老八院[卡片:某帖子标题]"
+    assert "pd.qq.com" not in parsed.body
+    assert parsed.cards == [
+        {"url": "https://pd.qq.com/s/example", "title": "某帖子标题"}
+    ]
+
+
+def test_decode_comment_content_annotates_mentions():
+    raw = _text_node("谢谢") + _mention_node("100000000000000001", "某同学")
+    parsed = cd.decode_comment_content(_b64(raw))
+    assert parsed.body == "谢谢[@某同学]"
+    assert parsed.mentions == [
+        {"tiny_id": "100000000000000001", "name": "某同学"}
+    ]
+
+
+def test_decode_comment_content_keeps_entities_in_order():
+    """多个实体要按原始顺序内联，不能都堆到末尾。"""
+    raw = (
+        _face_node("319")
+        + _text_node("这话在理")
+        + _link_node("https://pd.qq.com/s/example", "某帖子标题")
+    )
+    parsed = cd.decode_comment_content(_b64(raw))
+    assert parsed.body == "[表情:比心]这话在理[卡片:某帖子标题]"
 
 
 def test_decode_comment_content_falls_back_for_unknown_shape():
     """结构不认识时退回通用解码，保证不比旧行为更差。"""
-    assert cd.decode_comment_content("今天下午三点上课") == ("今天下午三点上课", "")
-    assert cd.decode_comment_content(None) == ("", "")
+    assert cd.decode_comment_content("今天下午三点上课").body == "今天下午三点上课"
+    assert cd.decode_comment_content(None).body == ""
     # 被上游截断的样本解析不成合法消息 → 走通用解码，正文仍然拿得回来
-    body, location = cd.decode_comment_content(COMMENT_TRUNCATED)
-    assert body.startswith("学习格斗术的，在游泳池旁边")
-    assert location == ""
+    parsed = cd.decode_comment_content(COMMENT_TRUNCATED)
+    assert parsed.body.startswith("学习格斗术的，在游泳池旁边")
+    assert parsed.location == ""
 
 
 # ---- 归一化 ----------------------------------------------------------------- #
@@ -257,16 +294,23 @@ def test_normalize_comment_decodes_body_and_author():
     comment = cd.normalize_comment(raw)
     assert comment["author"] == "rtgravia"
     assert comment["author_id"] == "77"
-    # 该样本末尾的「319」是 type=4 实体节点（表情）的载荷，不是正文
-    assert comment["content"] == "在游泳池西边有一栋小楼里"
+    # 该样本末尾的 type=4 节点是「比心」表情（id 319）：不再当正文数字，改为内联标注
+    assert comment["content"] == "在游泳池西边有一栋小楼里[表情:比心]"
+    assert comment["faces"] == [{"id": "319", "type": "1", "name": "比心"}]
     assert comment["location"] == ""
 
 
-def test_normalize_comment_exposes_location():
+def test_normalize_comment_exposes_location_and_entities():
     raw = {"content": _b64(_text_node("挂个") + _field(4, "陕西".encode()))}
-    assert cd.normalize_comment(raw)["location"] == "陕西"
-    # 富文本 dict 形态没有 protobuf 结构可拆，属地只能是空串
-    assert cd.normalize_comment({"content": {"contents": [{"text": "上课"}]}})["location"] == ""
+    comment = cd.normalize_comment(raw)
+    assert comment["location"] == "陕西"
+    assert comment["faces"] == []
+    assert comment["cards"] == []
+    assert comment["mentions"] == []
+    # 富文本 dict 形态没有 protobuf 结构可拆，属地与实体都只能是空
+    plain = cd.normalize_comment({"content": {"contents": [{"text": "上课"}]}})
+    assert plain["location"] == ""
+    assert plain["faces"] == []
 
 
 def test_normalize_channel_decodes_name():

@@ -558,18 +558,22 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         }
 
     def _comment_view(self, raw: dict[str, Any]) -> dict[str, Any]:
-        """把原始评论转成精简结构（正文自动 protobuf 解码，IP 属地单独给出）。
+        """把原始评论转成精简结构（正文 / IP 属地 / 实体分开给出）。
 
-        属地是上游自带的字段（顶层 ``#4``），旧实现会把它粘进正文，所以这里显式
-        拆开：模型不该把地名当成评论内容的一部分。
+        正文里的实体是带标注的内联形式（``[表情:汪汪]`` / ``[卡片:标题]`` / ``[@昵称]``），
+        原始 id / url 放在结构化字段里；空列表不放进结果，避免每次调用都带三个空数组。
         """
         comment = cdata.normalize_comment(raw)
-        return {
+        view: dict[str, Any] = {
             "author": comment["author"],
             "time": _format_timestamp(comment["create_time"]),
             "content": comment["content"],
             "location": comment["location"],
         }
+        for key in ("faces", "cards", "mentions"):
+            if comment.get(key):
+                view[key] = comment[key]
+        return view
 
     async def _search_feeds(self, guild_id: str, query: str) -> dict[str, Any]:
         """调用搜索接口并返回业务数据（searchType.type 必须为 0）。"""

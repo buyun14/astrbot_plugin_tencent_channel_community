@@ -151,8 +151,8 @@ https://github.com/piexian/astrbot_plugin_tencent_channel_community
 | `txcm_guild_channels` | 频道下的版块列表 | base64 解码版块名、解析嵌套结构 |
 | `txcm_search_feeds` | 关键词搜帖子 | 自动补 `searchType.type=0`、字段归一、相关度排序 |
 | `txcm_latest_feeds` | 主页帖子流（热门/最新） | 自动兜住 `getType=2` 返回空的情况 |
-| `txcm_read_feed` | 帖子详情 + 评论 | 评论 `vecComment` + base64 protobuf 解码；**正文与 IP 属地分离**（`location` 字段） |
-| `txcm_ask_channel` | **组合动作**：搜索 → 读评论 → 排序 | 一步拿到带出处（作者+时间+属地）的回答素材 |
+| `txcm_read_feed` | 帖子详情 + 评论 | 评论 `vecComment` + protobuf 解码；**正文 / IP 属地 / 表情·卡片·@提及 分开**（`location`、`faces`、`cards`、`mentions`） |
+| `txcm_ask_channel` | **组合动作**：搜索 → 读评论 → 排序 | 一步拿到带出处（作者+时间+属地）的回答素材，表情带名字标注 |
 
 `txcm_call_tool` / `txcm_call_cli_command` 仍然保留，作为访问全部 55 个原语的逃生舱。
 
@@ -164,6 +164,30 @@ https://github.com/piexian/astrbot_plugin_tencent_channel_community
   `code(0): / message(返回信息):` 文本协议；
 - **数据归一化**：`channel_data.py` 独立成纯函数模块（无 astrbot 依赖），可直接单测。
 
+### 评论是怎么呈现给模型的
+
+上游把正文、IP 属地、表情、卡片、@提及全塞在同一个 protobuf 里（见下方实测约束）。
+插件把它们拆开：正文里保留**带标注的内联形式**（按原顺序），原始 id / url 放进结构化字段：
+
+```json
+{
+  "author": "某同学",
+  "time": "2026-09-13 21:04",
+  "content": "哈哈哈哈[表情:汪汪]太真实了[卡片:某帖子标题][@某同学]",
+  "location": "陕西",
+  "faces": [{"id": "277", "type": "1", "name": "汪汪"}],
+  "cards": [{"url": "https://pd.qq.com/s/xxxx", "title": "某帖子标题"}],
+  "mentions": [{"tiny_id": "144115...", "name": "某同学"}]
+}
+```
+
+设计取舍：
+
+- **id 永不丢**——官方表情表只有部分表情，查不到名字时正文显示 `[表情:344]`；
+- **`type=2` 的 emoji 内联真字符**（`128523 → 😋`，无损，不需要维护表）；
+- **卡片只把标题放进正文，url 不进正文**——长链接会污染检索；
+- `faces` / `cards` / `mentions` 为空时不出现在结果里，避免每次调用都带三个空数组。
+
 ## 上游数据/接口约束（实测记录）
 
 这些是踩出来的、无法从文档得知的行为，已固化进代码：
@@ -174,7 +198,8 @@ https://github.com/piexian/astrbot_plugin_tencent_channel_community
 | `get_guild_feeds` | 帖子主键字段是 `id` 而不是 `feedId`；版块 id 埋在 `share.channelShareInfo.channelSign.channelId`；`getType=2`（最新）实测常返回空 |
 | `get_feed_comments` | 评论数组字段名是 `vecComment`，作者在 `postUser`；`channelSign` **必须带**且必须是**驼峰** `guildId`/`channelId`（蛇形报 8010，缺失直接"请求失败"）；**`pageSize` 必须 ≤ 20**（30/50 被拒） |
 | 中文字段 | `bytesGuildName` / 评论正文是 base64（正文是 protobuf），需解码；上游偶有**截断在字符中间**的情况，解码结果尾部可能带 1 个残字 |
-| 评论正文结构 | `content` 顶层 `#1`（可重复）是富文本节点，正文在 `#1 → #3 → #3.1`；**顶层 `#4` 是 IP 属地**（缺失时为空串）。节点类型 3 / 4 分别是链接卡片与表情实体，载荷在 `#5` / `#6`——它们不是正文，旧实现会把地名、表情 id、截断的卡片标题一起拼进正文 |
+| 评论正文结构 | `content` 顶层 `#1`（可重复）是富文本节点、`#4` 是 **IP 属地**；节点内 `#1` = 类型、`#(类型+2)` = 载荷：**1 文本 / 2 @提及 / 3 卡片 / 4 表情**。插件按此结构解析，旧实现会把地名、表情 id、截断的卡片标题一起拼进正文 |
+| 表情名字表 | `assets/qq_face_map.json` 取自[官方 Emoji 文档](https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html)。官方声明**只包含部分表情**，因此查不到名字时展示 `[表情:344]`（保留 id，不静默丢弃）；`type=2` 的 emoji 直接用码点还原真字符，不需要表 |
 
 ## 测试
 
@@ -238,6 +263,8 @@ astrbot_plugin_tencent_channel_community/
 ├── skill_guide.py          # 数据表：内置使用规则文本
 ├── constants.py            # 配置键映射、工具白名单、端点与协议默认值
 ├── errors.py               # TencentChannelError
+├── assets/
+│   └── qq_face_map.json    # 官方表情 id → 名字（来源与「只有部分表情」的说明见文件内注释）
 ├── channel_data.py         # 纯函数：解码 / 归一化 / 抽取 / 相关度（可单测）
 ├── mcp_protocol.py         # 纯函数：URL/请求头构造、凭据脱敏、失败分类、报文解析（可单测）
 ├── tools/

@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -28,7 +29,7 @@ except ImportError:
 
 
 PLUGIN_NAME = "astrbot_plugin_tencent_channel_community"
-PLUGIN_VERSION = "v0.3.0"
+PLUGIN_VERSION = "v0.3.1"
 DEFAULT_MCP_ENDPOINT = "https://graph.qq.com/mcp_gateway/open_platform_agent_mcp/mcp"
 DEFAULT_AUTH_BASE_URL = (
     "https://connect.qq.com/http2rpc/gotrpc/noauth/"
@@ -37,6 +38,30 @@ DEFAULT_AUTH_BASE_URL = (
 DEFAULT_DEVICE_CODE_REQUEST_URL = f"{DEFAULT_AUTH_BASE_URL}/RequestDeviceCode"
 DEFAULT_DEVICE_TOKEN_POLL_URL = f"{DEFAULT_AUTH_BASE_URL}/PollDeviceToken"
 MCP_PROTOCOL_VERSION = "2024-11-05"
+# 网关对凭证位置的要求与方法相关（实测）：
+#   initialize / tools/list / notifications/initialized → 只认 URL query 上的 token，
+#       附加 Authorization 头会返回 8011 "api info not exist"；
+#   tools/call → 必须附加 Authorization 头，否则 oidb 层报 151 "登录态验证失败"。
+MCP_MAX_ATTEMPTS = 3
+MCP_RETRY_BACKOFF_SECONDS = 1.5
+# 可重试：网关/oidb 层的瞬时抖动
+TRANSIENT_MCP_MARKERS = (
+    "登录态验证失败",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "cannot connect",
+)
+# 不可重试：表示工具/接口本身不存在（例如工具名拼错），重试没有意义
+NON_RETRYABLE_MCP_MARKERS = (
+    "api info not exist",
+    "130001",
+)
 REQUEST_DEVICE_CODE_OIDB = {"uint32_command": "0x995b", "uint32_service_type": "1"}
 POLL_DEVICE_TOKEN_OIDB = {"uint32_command": "0x995d", "uint32_service_type": "1"}
 TXCM_LLM_TOOL_NAMES = (
@@ -573,13 +598,19 @@ ENDPOINT_GUIDE: dict[str, dict[str, Any]] = {
             "Content-Type": "application/json",
             "X-Forwarded-Method": "POST",
         },
+        "query": {"token": "<token>"},
         "body": {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
             "params": {"name": "<tool_name>", "arguments": {}},
         },
-        "description": "所有 feed/manage 原子业务能力共用的 MCP JSON-RPC 端点。",
+        "description": (
+            "所有 feed/manage 原子业务能力共用的 MCP JSON-RPC 端点。"
+            "注意：Token 必须放在 URL query（?token=）；仅 tools/call 需要额外附加 "
+            "Authorization 头（oidb 登录态），initialize / tools/list 附加该头会报 8011。"
+            "initialize 后还需补发 notifications/initialized 通知。"
+        ),
     },
     "media_sliceupload": {
         "method": "POST",
@@ -636,6 +667,26 @@ _RATE_LIMIT_MARKERS = (
     "rate limit",
     "rate-limited",
 )
+
+
+def _is_transient_mcp_failure(detail: str) -> bool:
+    """判断 MCP 调用失败是否属于可重试的瞬时故障。
+
+    注意区分两类错误：
+    - 瞬时抖动（oidb 登录态抖动、HTTP 429/5xx、连接超时）→ 重试有意义；
+    - "api info not exist"（130001）→ 网关上根本没有这个工具/接口（工具名拼错、
+      接口未开通），重试无用，必须直接报错提示用户核对工具名。
+
+    Args:
+        detail: 错误详情文本，可为 HTTP 层或 JSON-RPC 层的消息。
+
+    Returns:
+        True 表示值得重试。
+    """
+    lowered = str(detail or "").lower()
+    if any(marker in lowered for marker in NON_RETRYABLE_MCP_MARKERS):
+        return False
+    return any(marker in lowered for marker in TRANSIENT_MCP_MARKERS)
 
 
 def _is_rate_limit_payload(parsed: Any) -> bool:
@@ -923,22 +974,94 @@ class TencentChannelCommunityPlugin(Star):
             raise TencentChannelError("腾讯频道端点返回了非 JSON 响应。") from exc
         return data
 
+    def _mcp_url(self) -> str:
+        """拼接 MCP 端点 URL，并把 Token 作为 query 参数带上。
+
+        所有方法的鉴权都依赖 URL query 上的 token；Authorization 头是 tools/call
+        的额外要求（见 _mcp_headers）。仅带 Authorization 头会返回
+        8011 "api info not exist"。
+
+        Returns:
+            已附加 token 查询参数的端点 URL。
+        """
+        endpoint = str(self._cfg("mcp_endpoint") or DEFAULT_MCP_ENDPOINT)
+        token = self._token()
+        if not token:
+            return endpoint
+
+        parts = urlsplit(endpoint)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key != "token"
+        ]
+        query.append(("token", token))
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+        )
+
+    def _mcp_headers(self, *, with_authorization: bool = False) -> dict[str, str]:
+        """构造 MCP 请求头。
+
+        实测网关对 Authorization 头的要求与方法相关：
+        - ``tools/call`` 必须带，否则在 oidb 层报 151 "登录态验证失败"；
+        - ``initialize`` / ``tools/list`` / ``notifications/initialized`` 带上反而会返回
+          8011 "api info not exist"，只能靠 URL query 上的 token 鉴权。
+
+        Args:
+            with_authorization: 是否附加 Authorization 头（仅 tools/call 需要）。
+
+        Returns:
+            请求头字典。
+        """
+        headers = {"Content-Type": "application/json", "X-Forwarded-Method": "POST"}
+        token = self._token()
+        if token and with_authorization:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    async def _notify_initialized(self) -> None:
+        """补发 MCP 规范的 notifications/initialized 通知。
+
+        initialize 之后缺少这一步会让后续 tools/list / tools/call 变得不稳定。
+        该通知是单向的，失败不阻断主流程。
+        """
+        payload = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        try:
+            await self._post_json(self._mcp_url(), payload, self._mcp_headers())
+        except TencentChannelError as exc:
+            logger.debug(f"[{PLUGIN_NAME}] notifications/initialized 发送失败（忽略）：{exc}")
+
     async def _mcp_request(
         self,
         method: str,
         params: dict[str, Any] | None = None,
         *,
         token_required: bool = False,
+        with_authorization: bool = False,
+        expect_tool_result: bool = False,
     ) -> dict[str, Any]:
+        """向 MCP 端点发起一次 JSON-RPC 调用，并对瞬时故障自动重试。
+
+        Args:
+            method: JSON-RPC 方法名。
+            params: 方法参数。
+            token_required: 是否强制要求已配置 Token。
+            with_authorization: 是否附加 Authorization 头（仅 tools/call 需要）。
+            expect_tool_result: 为 True 时不把 result.isError 当成异常抛出，
+                交由调用方 _extract_tool_result 生成友好错误。
+
+        Returns:
+            解析后的 JSON-RPC 响应。
+
+        Raises:
+            TencentChannelError: 请求失败、网关持续返回瞬时错误或响应格式异常。
+        """
         token = self._token()
         if token_required and not token:
             raise TencentChannelError(
                 "未配置 QQ AI Connect Token。请使用 /txcm token 写入。"
             )
-
-        headers = {"Content-Type": "application/json", "X-Forwarded-Method": "POST"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
 
         payload = {
             "jsonrpc": "2.0",
@@ -948,16 +1071,65 @@ class TencentChannelCommunityPlugin(Star):
         if params is not None:
             payload["params"] = params
 
-        data = await self._post_json(str(self._cfg("mcp_endpoint")), payload, headers)
-        if "error" in data:
-            error = data.get("error") or {}
-            message = error.get("message") if isinstance(error, dict) else str(error)
-            if "token" in str(message).lower() or "auth" in str(message).lower():
-                hint = "请检查 Token，或使用 /txcm login 重新授权。"
-            else:
-                hint = "请检查请求参数和 MCP 接口配置。"
-            raise TencentChannelError(f"MCP {method} 失败: {message}。{hint}", data)
-        return data
+        url = self._mcp_url()
+        headers = self._mcp_headers(with_authorization=with_authorization)
+        last_detail = ""
+        for attempt in range(1, MCP_MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                await asyncio.sleep(MCP_RETRY_BACKOFF_SECONDS * (attempt - 1))
+            try:
+                data = await self._post_json(url, payload, headers)
+            except TencentChannelError as exc:
+                last_detail = str(exc)
+                if attempt < MCP_MAX_ATTEMPTS and _is_transient_mcp_failure(last_detail):
+                    logger.warning(
+                        f"[{PLUGIN_NAME}] MCP {method} 瞬时失败（第 {attempt} 次），"
+                        f"将重试：{last_detail[:200]}"
+                    )
+                    continue
+                raise
+
+            if "error" in data:
+                error = data.get("error") or {}
+                message = error.get("message") if isinstance(error, dict) else str(error)
+                last_detail = f"MCP {method} 失败: {message}"
+                if attempt < MCP_MAX_ATTEMPTS and _is_transient_mcp_failure(
+                    f"{message} {json.dumps(error, ensure_ascii=False)}"
+                ):
+                    logger.warning(
+                        f"[{PLUGIN_NAME}] MCP {method} 瞬时失败（第 {attempt} 次），"
+                        f"将重试：{message}"
+                    )
+                    continue
+
+                if "token" in str(message).lower() or "auth" in str(message).lower():
+                    hint = "请检查 Token，或使用 /txcm login 重新授权。"
+                else:
+                    hint = "请检查请求参数和 MCP 接口配置。"
+                raise TencentChannelError(f"{last_detail}。{hint}", data)
+
+            # 网关会把鉴权/接口类错误包成 result.isError 返回（例如 8011 藏在
+            # _meta.AdditionalFields 里），这类同样需要重试后判定。
+            result = data.get("result")
+            if isinstance(result, dict) and result.get("isError"):
+                meta = (result.get("_meta") or {}).get("AdditionalFields") or {}
+                detail = f"{meta.get('retCode')} {meta.get('errMsg')}"
+                last_detail = f"MCP {method} 返回错误: {detail}"
+                if attempt < MCP_MAX_ATTEMPTS and _is_transient_mcp_failure(detail):
+                    logger.warning(
+                        f"[{PLUGIN_NAME}] MCP {method} 瞬时失败（第 {attempt} 次），"
+                        f"将重试：{detail[:200]}"
+                    )
+                    continue
+                if not expect_tool_result:
+                    raise TencentChannelError(
+                        f"{last_detail}。重试 {attempt} 次后仍失败，请稍后再试。", data
+                    )
+            return data
+
+        raise TencentChannelError(
+            f"{last_detail}。网关连续 {MCP_MAX_ATTEMPTS} 次返回瞬时故障，请稍后重试。"
+        )
 
     async def _initialize_mcp(self) -> dict[str, Any]:
         if self._server_info:
@@ -975,6 +1147,7 @@ class TencentChannelCommunityPlugin(Star):
         if not isinstance(result, dict):
             raise TencentChannelError("MCP initialize 返回格式异常。", response)
         self._server_info = result
+        await self._notify_initialized()
         return result
 
     async def _list_mcp_tools(self, *, force: bool = False) -> list[dict[str, Any]]:
@@ -986,11 +1159,22 @@ class TencentChannelCommunityPlugin(Star):
             return self._tool_cache
 
         await self._initialize_mcp()
-        response = await self._mcp_request("tools/list")
-        tools = response.get("result", {}).get("tools", [])
-        if not isinstance(tools, list):
-            raise TencentChannelError("MCP tools/list 返回格式异常。", response)
-        self._tool_cache = [tool for tool in tools if isinstance(tool, dict)]
+        tools: list[dict[str, Any]] = []
+        for attempt in range(1, MCP_MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                await asyncio.sleep(MCP_RETRY_BACKOFF_SECONDS * (attempt - 1))
+            response = await self._mcp_request("tools/list")
+            raw_tools = response.get("result", {}).get("tools", [])
+            if not isinstance(raw_tools, list):
+                raise TencentChannelError("MCP tools/list 返回格式异常。", response)
+            tools = [tool for tool in raw_tools if isinstance(tool, dict)]
+            if tools:
+                break
+            # 网关偶发返回空列表（同为瞬时故障），重试一次即可恢复。
+            logger.warning(
+                f"[{PLUGIN_NAME}] MCP tools/list 返回空列表（第 {attempt} 次）。"
+            )
+        self._tool_cache = tools
         return self._tool_cache
 
     def _extract_tool_result(self, response: dict[str, Any]) -> dict[str, Any]:
@@ -1038,6 +1222,12 @@ class TencentChannelCommunityPlugin(Star):
         else:
             text = str(message or "无详细信息")
 
+        if "api info not exist" in text.lower() or code == "130001":
+            return (
+                "网关上不存在该工具/接口（retCode 130001 api info not exist），"
+                "通常是工具名拼写错误。请用 txcm_list_tools 确认工具名，"
+                "再用 txcm_get_tool_schema 查看入参后重试。"
+            )
         if code == "8011" or "未登录" in text or "token" in text.lower():
             return "腾讯频道鉴权失败，请使用 /txcm login 重新授权，或用 /txcm token 写入有效 Token。"
         if _is_rate_limit_payload(parsed):
@@ -1086,6 +1276,8 @@ class TencentChannelCommunityPlugin(Star):
                 "tools/call",
                 {"name": normalized, "arguments": arguments},
                 token_required=True,
+                with_authorization=True,
+                expect_tool_result=True,
             )
             return self._extract_tool_result(response)
         except TencentChannelError as exc:
@@ -1099,6 +1291,8 @@ class TencentChannelCommunityPlugin(Star):
                 "tools/call",
                 {"name": normalized, "arguments": arguments},
                 token_required=True,
+                with_authorization=True,
+                expect_tool_result=True,
             )
             return self._extract_tool_result(response)
 
@@ -1307,10 +1501,14 @@ class TencentChannelCommunityPlugin(Star):
                 "管理员权限由 AstrBot 的指令和工具权限配置控制。"
             ),
             "login": (
-                "登录规则：MCP 调用使用 QQ AI Connect Token，HTTP Header 为 "
-                "Authorization: Bearer <token>。/txcm token 可写入 Token。/txcm login "
-                "会直接请求腾讯连接设备授权端点，发送二维码/授权链接并自动轮询回写 Token。"
-                "鉴权失败（retCode 8011 或'未登录'）时需重新 /txcm login 或 /txcm token。"
+                "登录规则：MCP 调用使用 QQ AI Connect Token，Token 统一放在 URL query"
+                "（?token=）上鉴权；只有 tools/call 需要额外附加 HTTP Header "
+                "Authorization: Bearer <token>（oidb 登录态），而 initialize / tools/list "
+                "附加该头反而会报 8011 'api info not exist'。initialize 之后会补发 "
+                "notifications/initialized 通知，并对 8011/130001/151 这类网关瞬时故障"
+                "自动重试。/txcm token 可写入 Token；/txcm login 会直接请求腾讯连接设备"
+                "授权端点，发送二维码/授权链接并自动轮询回写 Token。"
+                "重试后仍报 8011 或'未登录'时，需重新 /txcm login 或 /txcm token。"
             ),
             "guild": (
                 "频道管理：先用 txcm_list_guilds 获取当前账号频道；需要具体工具参数时，"

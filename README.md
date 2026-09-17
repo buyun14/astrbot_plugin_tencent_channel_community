@@ -120,6 +120,25 @@ https://github.com/piexian/astrbot_plugin_tencent_channel_community
 }
 ```
 
+## 接口鉴权说明（v0.3.1 修正）
+
+上游网关 `graph.qq.com/mcp_gateway/open_platform_agent_mcp/mcp` 对 Token 的携带位置要求**按方法区分**，实测结论如下：
+
+| 方法 | URL query `?token=` | `Authorization: Bearer` 头 |
+|------|--------------------|---------------------------|
+| `initialize` | 必需 | **不要带**，带了返回 8011 `api info not exist` |
+| `tools/list` | 必需 | **不要带**，带了返回 8011 `api info not exist` |
+| `notifications/initialized` | 必需 | 不要带 |
+| `tools/call` | 需要 | **必需**，不带会返回 151 `[oidb]登录态验证失败` |
+
+因此 v0.3.0 只带 `Authorization` 头的做法会导致 initialize 直接失败，表现为「明明已扫码授权，却一直提示鉴权失败、请重新登录」。v0.3.1 改为：
+
+1. 统一把 Token 放进 URL query（`_mcp_url`）；
+2. 仅 `tools/call` 额外附加 `Authorization` 头（`_mcp_headers(with_authorization=True)`）；
+3. `initialize` 之后补发 MCP 规范的 `notifications/initialized` 通知；
+4. 对 oidb 登录态抖动、HTTP 429/5xx、超时等瞬时故障自动重试（默认 3 次，指数退避）；
+5. 区分错误语义：`api info not exist`（130001）表示**网关没有这个工具/接口**（通常工具名拼错），不重试并直接提示核对工具名；`tools/list` 返回空列表时也会重试。
+
 ## CLI 对齐范围
 
 - `feed` / `manage` 原子命令映射到 MCP tool，可用 `/txcm map <domain.action>` 查询。

@@ -6,6 +6,10 @@
 - 频道名 / 频道号等字段是 base64 编码的 UTF-8 明文（如 ``bytesGuildName``）；
 - 帖子正文、评论正文是 base64 包裹的 protobuf，可读文本以 length-delimited
   字符串形式嵌在里面；
+- **评论 content 的顶层 ``#4`` 是 IP 属地**（如「陕西」，缺失时为空串），
+  正文在顶层 ``#1`` 富文本节点里。早期实现递归收集所有文本字段，会把属地
+  粘在正文末尾、并让回复内的计数（``#1.6``）漏进正文，故评论走
+  :func:`decode_comment_content` 按结构分离（见该函数注释）；
 - 不同接口返回的帖子 id 字段名不一致（热门流是 ``id``，搜索是 ``feedId``），
   子频道 id 在热门流里埋在 ``share.channelShareInfo.channelSign.channelId``；
 - 评论数组字段名是 ``vecComment``，评论作者在 ``postUser``。
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import re
+import unicodedata
 from typing import Any
 
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
@@ -129,8 +134,47 @@ def _iter_length_delimited(data: bytes):
             return
 
 
+def _is_emoji(char: str) -> bool:
+    """判断字符是不是 emoji 一类的符号（含变体选择符与零宽连接符）。
+
+    这类字符的 ``isprintable()`` 不一定为 True（零宽连接符 ZWJ 就是 False），
+    但它们属于正文的一部分，不能因为"不是中文/数字"被丢掉。
+    """
+    code = ord(char)
+    if code in (0x200D, 0xFE0E, 0xFE0F):  # ZWJ / 变体选择符
+        return True
+    return code >= 0x2000 and unicodedata.category(char) in {"So", "Sk"}
+
+
+def _clean_text(text: str) -> str:
+    """裁剪 protobuf 噪声并校验一段候选文本（中文 / 数字 / emoji 视为正文）。
+
+    只含 ASCII 单词的片段不在这里放行：那类字节太容易撞上，交给
+    :func:`_heuristic_text` 兜底。
+
+    Args:
+        text: 已解码的候选文本。
+
+    Returns:
+        可用的正文片段；判定为噪声时返回空串。
+    """
+    # protobuf 标签/长度字节常落到 ASCII 标点上，剪掉收尾的这类噪声
+    text = text.strip().lstrip(_ASCII_NOISE)
+    if not text:
+        return ""
+    if any(not (_is_emoji(ch) or ch.isprintable() or ch.isspace()) for ch in text):
+        return ""
+    if _CJK_RE.search(text):
+        return text
+    if text.isdigit() and len(text) >= 2:
+        return text
+    if any(_is_emoji(ch) for ch in text):
+        return text
+    return ""
+
+
 def _as_printable_text(chunk: bytes) -> str:
-    """判断一段载荷是不是可读文本（含中文或纯数字），否则交由上层继续下钻。"""
+    """判断一段载荷是不是可读文本（含中文 / 数字 / emoji），否则交由上层继续下钻。"""
     try:
         text = chunk.decode("utf-8")
     except UnicodeDecodeError:
@@ -138,17 +182,7 @@ def _as_printable_text(chunk: bytes) -> str:
         # 丢掉少量尾部残字节（例如被上游截断的正文）仍然可用，丢太多则视为二进制
         if len(text.encode("utf-8")) <= len(chunk) - 4:
             return ""
-    # protobuf 标签/长度字节常落到 ASCII 标点上，剪掉收尾的这类噪声
-    text = text.strip().lstrip(_ASCII_NOISE)
-    if not text:
-        return ""
-    if any(not (ch.isprintable() or ch.isspace()) for ch in text):
-        return ""
-    if _CJK_RE.search(text):
-        return text
-    if text.isdigit() and len(text) >= 2:
-        return text
-    return ""
+    return _clean_text(text)
 
 
 def _protobuf_texts(data: bytes, depth: int = 0) -> list[str]:
@@ -200,6 +234,169 @@ def _is_cjk(char: str) -> bool:
         or ("\u3000" <= char <= "\u303f")
         or ("\uff00" <= char <= "\uffef")
     )
+
+
+# --------------------------------------------------------------------------- #
+# 评论正文 / IP 属地分离
+# --------------------------------------------------------------------------- #
+_COMMENT_NODE_FIELD = 1  # 顶层 #1（可重复）= 一个富文本节点
+_COMMENT_NODE_TEXT_FIELD = 3  # 节点内 #3 = 节点载荷（字符串，或再套一层消息）
+_COMMENT_LOCATION_FIELD = 4  # 顶层 #4 = IP 属地
+# 字段号大于它的"消息"基本是碰巧能当 varint 解出来的文本（emoji 就是这种情况）
+_MAX_PLAUSIBLE_FIELD_NO = 512
+
+
+def _parse_fields_strict(data: bytes) -> list[tuple[int, int, Any]] | None:
+    """严格解析 protobuf 顶层字段，结构不完整时返回 ``None``。
+
+    与 :func:`_iter_length_delimited` 的宽松不同：这里要求每个字段声明的长度都精确
+    落在缓冲区里。只有这样才能把"真嵌套消息"和"一段恰好能当消息解的文本"区分开
+    —— emoji 的 4 个字节就能被解成一个字段号巨大的 varint 字段。
+
+    Args:
+        data: 待解析字节。
+
+    Returns:
+        ``[(字段号, wire_type, 载荷或 varint 值)]``；解析失败返回 ``None``。
+    """
+    fields: list[tuple[int, int, Any]] = []
+    index = 0
+    while index < len(data):
+        tag, index = _read_varint(data, index)
+        if tag is None:
+            return None
+        field_no, wire = tag >> 3, tag & 0x07
+        if field_no == 0:
+            return None
+        if wire == 0:
+            value, index = _read_varint(data, index)
+            if value is None:
+                return None
+            fields.append((field_no, wire, value))
+        elif wire == 2:
+            length, index = _read_varint(data, index)
+            if length is None or index + length > len(data):
+                return None
+            fields.append((field_no, wire, data[index : index + length]))
+            index += length
+        elif wire == 5:
+            if index + 4 > len(data):
+                return None
+            index += 4
+        elif wire == 1:
+            if index + 8 > len(data):
+                return None
+            index += 8
+        else:
+            return None
+    return fields or None
+
+
+def _parse_message(data: bytes) -> list[tuple[int, int, Any]] | None:
+    """把载荷当成嵌套消息解析；不像合法消息时返回 ``None``。"""
+    fields = _parse_fields_strict(data)
+    if fields is None:
+        return None
+    if any(field_no > _MAX_PLAUSIBLE_FIELD_NO for field_no, _, _ in fields):
+        return None
+    return fields
+
+
+def _plain_text(payload: bytes) -> str:
+    """把载荷直接当字符串解读（像合法消息、或不可打印时返回空串）。"""
+    if _parse_message(payload) is not None:
+        return ""
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+    return _clean_text(text)
+
+
+def _nested_text(payload: bytes) -> str:
+    """在嵌套消息里取第一个可用的文本字段（用于 ``#3.1`` 这一层）。"""
+    fields = _parse_message(payload)
+    if fields is None:
+        return ""
+    for _field_no, wire, value in fields:
+        if wire != 2:
+            continue
+        text = _plain_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _node_text(node: bytes) -> str:
+    """取一个富文本节点（顶层 ``#1``）的文本。
+
+    实测节点结构是 ``#1 → #3``，而 ``#3`` 可能是字符串、也可能再套一层
+    （``#3.1`` 才是字符串）。这里只认 ``#3``：回复节点里 ``#1.6``（计数）之类的
+    字段不会被当成正文。
+
+    Args:
+        node: 顶层 ``#1`` 的载荷。
+
+    Returns:
+        节点文本；取不到时返回空串。
+    """
+    fields = _parse_message(node)
+    if fields is None:
+        return ""
+    for field_no, wire, value in fields:
+        if wire != 2 or field_no != _COMMENT_NODE_TEXT_FIELD:
+            continue
+        text = _plain_text(value) or _nested_text(value)
+        if text:
+            return text
+    return ""
+
+
+def decode_comment_content(value: Any) -> tuple[str, str]:
+    """把评论 / 回复的 content 拆成 ``(正文, IP 属地)``。
+
+    结构不认识时退回 :func:`decode_protobuf_text`，保证不比旧行为更差。
+
+    Args:
+        value: 原始 content 字段，通常是 base64 包裹的 protobuf。
+
+    Returns:
+        ``(正文, IP 属地)``；属地未知时为空串。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return "", ""
+    text = value.strip()
+    if len(text) < 8 or not _BASE64_RE.fullmatch(text):
+        return decode_protobuf_text(text), ""
+    try:
+        raw = base64.b64decode(text + "=" * (-len(text) % 4), validate=False)
+    except (ValueError, TypeError):
+        return decode_protobuf_text(text), ""
+
+    fields = _parse_message(raw)
+    if fields is None:
+        return decode_protobuf_text(text), ""
+
+    parts: list[str] = []
+    location = ""
+    node_seen = False
+    for field_no, wire, payload in fields:
+        if wire != 2:
+            continue
+        if field_no == _COMMENT_NODE_FIELD:
+            node_seen = True
+            part = _node_text(payload)
+            if part:
+                parts.append(part)
+        elif field_no == _COMMENT_LOCATION_FIELD and not location:
+            location = _plain_text(payload)
+
+    if not node_seen:
+        # 结构不认识（正文不挂在 #1 下）：退回通用解码，至少不丢正文
+        return decode_protobuf_text(text), location
+    # 结构认识但取不到文本 = 这条评论只有实体节点（例如只有一个表情），
+    # 此时正文就该是空的；不能回退到通用解码，否则又会把实体 id 当正文。
+    return _join_parts(parts), location
 
 
 def first_text(node: Any) -> str:
@@ -378,24 +575,31 @@ def normalize_feed(raw: Any) -> dict[str, Any]:
 
 
 def normalize_comment(raw: Any) -> dict[str, Any]:
-    """把评论结构归一化（正文自动做 protobuf 解码）。
+    """把评论结构归一化（正文自动做 protobuf 解码，IP 属地单独返回）。
 
     Args:
         raw: 原始评论字典。
 
     Returns:
-        含 ``author`` / ``author_id`` / ``content`` / ``create_time`` 的字典。
+        含 ``author`` / ``author_id`` / ``content`` / ``location`` / ``create_time``
+        的字典；``location`` 是上游的 IP 属地，未知时为空串。
     """
     if not isinstance(raw, dict):
         return {}
     author = raw.get("postUser") if isinstance(raw.get("postUser"), dict) else {}
     if not author and isinstance(raw.get("poster"), dict):
         author = raw["poster"]
-    content = first_text(_lookup(raw, "content", "richContents", "contents"))
+    raw_content = _lookup(raw, "content", "richContents", "contents")
+    if isinstance(raw_content, str):
+        content, location = decode_comment_content(raw_content)
+    else:
+        # 富文本 dict 形态：没有 protobuf 结构可拆，属地也无从谈起
+        content, location = first_text(raw_content), ""
     return {
         "author": str(author.get("nick") or _lookup(raw, "nickName") or ""),
         "author_id": str(author.get("tinyId") or ""),
         "content": content.strip(),
+        "location": location,
         "create_time": as_int(_lookup(raw, "createTime", "create_time")),
     }
 

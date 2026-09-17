@@ -151,8 +151,8 @@ https://github.com/piexian/astrbot_plugin_tencent_channel_community
 | `txcm_guild_channels` | 频道下的版块列表 | base64 解码版块名、解析嵌套结构 |
 | `txcm_search_feeds` | 关键词搜帖子 | 自动补 `searchType.type=0`、字段归一、相关度排序 |
 | `txcm_latest_feeds` | 主页帖子流（热门/最新） | 自动兜住 `getType=2` 返回空的情况 |
-| `txcm_read_feed` | 帖子详情 + 评论 | 评论 `vecComment` + base64 protobuf 解码 |
-| `txcm_ask_channel` | **组合动作**：搜索 → 读评论 → 排序 | 一步拿到带出处（作者+时间）的回答素材 |
+| `txcm_read_feed` | 帖子详情 + 评论 | 评论 `vecComment` + base64 protobuf 解码；**正文与 IP 属地分离**（`location` 字段） |
+| `txcm_ask_channel` | **组合动作**：搜索 → 读评论 → 排序 | 一步拿到带出处（作者+时间+属地）的回答素材 |
 
 `txcm_call_tool` / `txcm_call_cli_command` 仍然保留，作为访问全部 55 个原语的逃生舱。
 
@@ -174,6 +174,7 @@ https://github.com/piexian/astrbot_plugin_tencent_channel_community
 | `get_guild_feeds` | 帖子主键字段是 `id` 而不是 `feedId`；版块 id 埋在 `share.channelShareInfo.channelSign.channelId`；`getType=2`（最新）实测常返回空 |
 | `get_feed_comments` | 评论数组字段名是 `vecComment`，作者在 `postUser`；`channelSign` **必须带**且必须是**驼峰** `guildId`/`channelId`（蛇形报 8010，缺失直接"请求失败"）；**`pageSize` 必须 ≤ 20**（30/50 被拒） |
 | 中文字段 | `bytesGuildName` / 评论正文是 base64（正文是 protobuf），需解码；上游偶有**截断在字符中间**的情况，解码结果尾部可能带 1 个残字 |
+| 评论正文结构 | `content` 顶层 `#1`（可重复）是富文本节点，正文在 `#1 → #3 → #3.1`；**顶层 `#4` 是 IP 属地**（缺失时为空串）。节点类型 3 / 4 分别是链接卡片与表情实体，载荷在 `#5` / `#6`——它们不是正文，旧实现会把地名、表情 id、截断的卡片标题一起拼进正文 |
 
 ## 测试
 

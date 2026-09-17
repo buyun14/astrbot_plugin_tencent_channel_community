@@ -558,12 +558,17 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         }
 
     def _comment_view(self, raw: dict[str, Any]) -> dict[str, Any]:
-        """把原始评论转成精简结构（正文自动 protobuf 解码）。"""
+        """把原始评论转成精简结构（正文自动 protobuf 解码，IP 属地单独给出）。
+
+        属地是上游自带的字段（顶层 ``#4``），旧实现会把它粘进正文，所以这里显式
+        拆开：模型不该把地名当成评论内容的一部分。
+        """
         comment = cdata.normalize_comment(raw)
         return {
             "author": comment["author"],
             "time": _format_timestamp(comment["create_time"]),
             "content": comment["content"],
+            "location": comment["location"],
         }
 
     async def _search_feeds(self, guild_id: str, query: str) -> dict[str, Any]:

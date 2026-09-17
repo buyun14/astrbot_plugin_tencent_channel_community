@@ -5,6 +5,8 @@ fixtures 全部取自真实接口返回（已脱敏，只保留结构特征）�
 
 from __future__ import annotations
 
+import base64
+
 import channel_data as cd
 
 # ---- 真实样本 -------------------------------------------------------------- #
@@ -39,8 +41,11 @@ def test_decode_bytes_text_handles_empty_and_invalid():
     assert cd.decode_bytes_text("ab+/") == "ab+/"
 
 
-def test_decode_protobuf_text_recovers_chinese_and_room_number():
-    assert cd.decode_protobuf_text(COMMENT_FULL) == "在游泳池西边有一栋小楼里319"
+def test_decode_protobuf_text_recovers_chinese_text():
+    # 通用解码器（只用于帖子正文兜底）会收集所有文本字段，所以也含 type=4 实体节点
+    # 的载荷「319」（一个表情 id）。评论必须走 decode_comment_content，
+    # 才不会把实体、IP 属地拼进正文——见下面的「评论正文 / IP 属地」用例。
+    assert cd.decode_protobuf_text(COMMENT_FULL).startswith("在游泳池西边有一栋小楼里")
 
 
 def test_decode_protobuf_text_survives_truncated_payload():
@@ -72,6 +77,115 @@ def test_as_int_is_lenient():
     assert cd.as_int(42) == 42
     assert cd.as_int("abc", default=-1) == -1
     assert cd.as_int(None) == 0
+
+
+# ---- 评论正文 / IP 属地 ------------------------------------------------------ #
+# fixture 按真实抓包的结构构造（可见文本做了替换，字段号与嵌套关系保持一致）：
+#   顶层 #1（可重复）= 一个富文本节点，节点内 #3 → #3.1 才是文本字符串
+#   顶层 #4 = IP 属地
+#   节点类型 3 / 4 分别是链接卡片与实体（表情）节点，载荷在 #5 / #6，不是正文
+def _varint(value: int) -> bytes:
+    out = b""
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        out += bytes([byte | (0x80 if value else 0)])
+        if not value:
+            return out
+
+
+def _field(field_no: int, payload: bytes) -> bytes:
+    return _varint((field_no << 3) | 2) + _varint(len(payload)) + payload
+
+
+def _varint_field(field_no: int, value: int) -> bytes:
+    return _varint(field_no << 3) + _varint(value)
+
+
+def _text_node(text: str) -> bytes:
+    """type=1 富文本节点：``#1 → #3 → #3.1 = 文本``。"""
+    return _field(1, _varint_field(1, 1) + _field(3, _field(1, text.encode())))
+
+
+def _face_node(face_id: str) -> bytes:
+    """type=4 实体节点（表情）：载荷是 ``#6 = {1: id, 2: '1'}``，不是正文。"""
+    return _field(
+        1,
+        _varint_field(1, 4) + _field(6, _field(1, face_id.encode()) + _field(2, b"1")),
+    )
+
+
+def _link_node(url: str, title: str) -> bytes:
+    """type=3 链接卡片节点：载荷是 ``#5 = {1: url, 2: 标题}``。"""
+    return _field(
+        1,
+        _varint_field(1, 3) + _field(5, _field(1, url.encode()) + _field(2, title.encode())),
+    )
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+def test_decode_comment_content_separates_ip_location():
+    """顶层 #4 是 IP 属地，不能粘在正文末尾（真实抓包的回归点）。"""
+    raw = _text_node("挂个") + _text_node("🪜") + _field(4, "陕西".encode())
+    body, location = cd.decode_comment_content(_b64(raw))
+    assert body == "挂个🪜"
+    assert location == "陕西"
+
+
+def test_decode_comment_content_keeps_emoji_only_segment():
+    """只有 emoji 的节点也必须保留（它的字节能被误判成 varint 字段）。"""
+    body, location = cd.decode_comment_content(_b64(_text_node("🪜")))
+    assert body == "🪜"
+    assert location == ""
+
+
+def test_decode_comment_content_ignores_entity_node_payload():
+    """type=4 实体（表情）的 id 不是正文——旧实现会把它拼进去。"""
+    raw = (
+        _text_node("我想要客户端的能教教吗")
+        + _face_node("63")
+        + _field(4, "陕西".encode())
+    )
+    body, location = cd.decode_comment_content(_b64(raw))
+    assert body == "我想要客户端的能教教吗"
+    assert "63" not in body
+    assert location == "陕西"
+
+
+def test_decode_comment_content_entity_only_has_empty_body():
+    """整条评论只有一个表情时正文为空，且不能回退去把表情 id 当正文。"""
+    body, location = cd.decode_comment_content(_b64(_face_node("319") + _field(4, b"")))
+    assert body == ""
+    assert location == ""
+
+
+def test_decode_comment_content_drops_link_card_payloads():
+    """链接卡片（type=3）的 URL 与标题不进正文。
+
+    卡片是实体节点，正文只取 type=1 节点的 ``#3``。旧实现会把 URL 和**被上游截断
+    的标题**一起拼进正文，读起来是「…事少分高推荐一下老八院的专业...」。如果以后
+    要把卡片标题还给模型，请另开结构化字段，不要拼回正文。
+    """
+    raw = _text_node("推荐一下老八院") + _link_node(
+        "https://pd.qq.com/s/7epipxs6k", "《Triz创新理论及..."
+    )
+    body, location = cd.decode_comment_content(_b64(raw))
+    assert body == "推荐一下老八院"
+    assert "pd.qq.com" not in body
+    assert location == ""
+
+
+def test_decode_comment_content_falls_back_for_unknown_shape():
+    """结构不认识时退回通用解码，保证不比旧行为更差。"""
+    assert cd.decode_comment_content("今天下午三点上课") == ("今天下午三点上课", "")
+    assert cd.decode_comment_content(None) == ("", "")
+    # 被上游截断的样本解析不成合法消息 → 走通用解码，正文仍然拿得回来
+    body, location = cd.decode_comment_content(COMMENT_TRUNCATED)
+    assert body.startswith("学习格斗术的，在游泳池旁边")
+    assert location == ""
 
 
 # ---- 归一化 ----------------------------------------------------------------- #
@@ -143,7 +257,16 @@ def test_normalize_comment_decodes_body_and_author():
     comment = cd.normalize_comment(raw)
     assert comment["author"] == "rtgravia"
     assert comment["author_id"] == "77"
-    assert comment["content"] == "在游泳池西边有一栋小楼里319"
+    # 该样本末尾的「319」是 type=4 实体节点（表情）的载荷，不是正文
+    assert comment["content"] == "在游泳池西边有一栋小楼里"
+    assert comment["location"] == ""
+
+
+def test_normalize_comment_exposes_location():
+    raw = {"content": _b64(_text_node("挂个") + _field(4, "陕西".encode()))}
+    assert cd.normalize_comment(raw)["location"] == "陕西"
+    # 富文本 dict 形态没有 protobuf 结构可拆，属地只能是空串
+    assert cd.normalize_comment({"content": {"contents": [{"text": "上课"}]}})["location"] == ""
 
 
 def test_normalize_channel_decodes_name():

@@ -1,7 +1,7 @@
 name: astrbot_plugin_tencent_channel_community
 display_name: 腾讯频道社区管理工具
 desc: 通过 tencent-channel-cli 接口管理 QQ 频道，内置使用规则并注册 LLM Tools。
-version: v0.5.0
+version: v0.4.0
 author: piexian
 repo: https://github.com/piexian/astrbot_plugin_tencent_channel_community
 astrbot_version: ">=4.16"

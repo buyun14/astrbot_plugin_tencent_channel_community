@@ -81,7 +81,7 @@ def test_extract_strips_official_root_prefix(tmp_path):
             "tencent-channel-community/references/feed-reference.md": "feed",
         }
     )
-    cache_dir = skill_source.extract_skill_zip(data, tmp_path / "skill", "1.1.5")
+    skill_source.extract_skill_zip(data, tmp_path / "skill", "1.1.5")
     topics = skill_source.official_topics(tmp_path / "skill")
     assert set(topics) == {"overview", "feed"}
 

@@ -39,6 +39,28 @@
         "description": "HTTP 代理",
         "hint": "例如 http://127.0.0.1:7890，留空使用系统环境",
         "default": ""
+      },
+      "min_request_interval_ms": {
+        "type": "int",
+        "description": "最小请求间隔（毫秒）",
+        "hint": "全局限速闸门，避免并发触发网关频率限制；0 表示不限速",
+        "default": 400,
+        "slider": {
+          "min": 0,
+          "max": 3000,
+          "step": 100
+        }
+      },
+      "cache_ttl_seconds": {
+        "type": "int",
+        "description": "数据缓存有效期（秒）",
+        "hint": "频道列表 / 版块列表等低频数据的缓存时间；0 表示不缓存",
+        "default": 300,
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 60
+        }
       }
     }
   },

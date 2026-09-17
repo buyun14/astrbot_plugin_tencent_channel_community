@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 PLUGIN_NAME = "astrbot_plugin_tencent_channel_community"
-PLUGIN_VERSION = "v0.4.0"
+PLUGIN_VERSION = "v0.5.0"
 
 DEFAULT_MCP_ENDPOINT = "https://graph.qq.com/mcp_gateway/open_platform_agent_mcp/mcp"
 DEFAULT_AUTH_BASE_URL = (

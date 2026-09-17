@@ -7,16 +7,14 @@ import json
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from pathlib import Path
 from typing import Any
 
 import aiohttp
 
 import astrbot.api.message_components as Comp
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger, sp
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
-from astrbot.api.star import Context, Star, register
-from astrbot.core import AstrBotConfig, sp
+from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
 
 from . import channel_data as cdata
@@ -28,12 +26,6 @@ from .tools.schema import (
     object_parameters,
     string_param,
 )
-
-try:
-    from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
-except ImportError:
-    get_astrbot_plugin_data_path = None
-
 
 PLUGIN_NAME = "astrbot_plugin_tencent_channel_community"
 PLUGIN_VERSION = "v0.4.0"
@@ -72,6 +64,8 @@ TXCM_LLM_TOOL_NAMES = (
     "txcm_endpoint_guide",
 )
 
+# 配置键 -> (_conf_schema.json 中的分组名, 分组内的键名)。
+# 新增配置键必须同时补进 _conf_schema.json 和这里，否则 WebUI 里改了也不生效。
 CONFIG_PATHS = {
     "qq_ai_connect_token": ("account_settings", "qq_ai_connect_token"),
     "mcp_endpoint": ("connection_settings", "mcp_endpoint"),
@@ -90,6 +84,7 @@ CONFIG_PATHS = {
     "login_poll_payload_json": ("login_settings", "login_poll_payload_json"),
 }
 
+# 兜底默认值：只在配置文件中缺少该键时生效（正常情况由 _conf_schema.json 提供默认值）。
 CONFIG_DEFAULTS = {
     "qq_ai_connect_token": "",
     "mcp_endpoint": DEFAULT_MCP_ENDPOINT,
@@ -574,6 +569,9 @@ CLI_COMMANDS: dict[str, dict[str, Any]] = {
     },
 }
 
+# 官方 Skill/CLI 更新检测端点（ENDPOINT_GUIDE 与 _check_skill_update 共用同一份）。
+SKILL_UPDATE_CHECK_URL = "https://connect.qq.com/skills/tencent-channel-community.zip"
+
 ENDPOINT_GUIDE: dict[str, dict[str, Any]] = {
     "login_request_device_code": {
         "method": "POST",
@@ -621,12 +619,10 @@ ENDPOINT_GUIDE: dict[str, dict[str, Any]] = {
     },
     "skill_update_check": {
         "method": "HEAD",
-        "url": "https://connect.qq.com/skills/tencent-channel-community.zip",
+        "url": SKILL_UPDATE_CHECK_URL,
         "description": "官方 Skill/CLI 更新检测端点，读取 x-cos-meta-tcc-version 等响应头。",
     },
 }
-
-SKILL_UPDATE_CHECK_URL = "https://connect.qq.com/skills/tencent-channel-community.zip"
 
 # 官方 tencent-channel-community Skill 版本，来源为 SKILL.md frontmatter version。
 # 升级官方 Skill 后需手动同步此处，否则 /txcm status 的版本比对结果会失真。
@@ -713,12 +709,8 @@ def _parse_json_text(text: str, *, fallback: Any = None) -> Any:
         return fallback
 
 
-@register(
-    PLUGIN_NAME,
-    "腾讯频道社区管理工具",
-    "通过 tencent-channel-cli 接口管理 QQ 频道，内置使用规则并注册 LLM Tools。",
-    PLUGIN_VERSION,
-)
+# 插件元数据以 metadata.yaml 为准（优先级高于已废弃的 @register 装饰器），
+# 这里不再重复声明名称/描述/版本，避免两处漂移。
 class TencentChannelCommunityPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None):
         super().__init__(context)
@@ -926,18 +918,18 @@ class TencentChannelCommunityPlugin(Star):
                 plugin=self,
             ),
         )
-        self._ensure_default_tool_permissions()
+        await self._ensure_default_tool_permissions()
         logger.info(f"[{PLUGIN_NAME}] Tencent Channel LLM tools registered")
 
-    def _ensure_default_tool_permissions(self) -> None:
-        """把本插件 LLM Tools 的默认权限交给 AstrBot 权限配置。"""
+    async def _ensure_default_tool_permissions(self) -> None:
+        """把本插件 LLM Tools 的默认权限交给 AstrBot 权限配置。
+
+        AstrBot 只在 ``tool_permissions._default`` 里没有该工具时才回退到"非内置工具
+        默认 member（不限制）"，所以这里显式写入 admin，避免本插件的写操作级工具
+        被普通成员直接调用。已存在的配置不会被覆盖。
+        """
         try:
-            perms_store = sp.get(
-                "tool_permissions",
-                {},
-                scope="global",
-                scope_id="global",
-            )
+            perms_store = await sp.global_get("tool_permissions", {})
             if not isinstance(perms_store, dict):
                 perms_store = {}
             defaults = perms_store.get("_default", {})
@@ -951,12 +943,7 @@ class TencentChannelCommunityPlugin(Star):
                     changed = True
             if changed:
                 perms_store["_default"] = defaults
-                sp.put(
-                    "tool_permissions",
-                    perms_store,
-                    scope="global",
-                    scope_id="global",
-                )
+                await sp.global_put("tool_permissions", perms_store)
         except Exception as exc:
             logger.warning(
                 f"[{PLUGIN_NAME}] failed to set default tool permissions: {exc}"
@@ -993,15 +980,6 @@ class TencentChannelCommunityPlugin(Star):
         save_config = getattr(self.config, "save_config", None)
         if callable(save_config):
             save_config()
-
-    def _plugin_data_dir(self) -> Path:
-        if get_astrbot_plugin_data_path is not None:
-            root = Path(get_astrbot_plugin_data_path())
-        else:
-            root = Path(__file__).resolve().parent / "data" / "plugin_data"
-        path = root / PLUGIN_NAME
-        path.mkdir(parents=True, exist_ok=True)
-        return path
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -2618,7 +2596,7 @@ class TencentChannelCommunityPlugin(Star):
                 lines.append(f"  {item['note']}")
             if len(lines) >= 90:
                 lines.append("... 已截断，请加关键词过滤")
-            break
+                break
         yield event.plain_result("\n".join(lines) if lines else "未找到匹配命令。")
 
     @txcm.custom_filter(filter.PermissionTypeFilter, filter.PermissionType.ADMIN)

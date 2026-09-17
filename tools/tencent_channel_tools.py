@@ -35,6 +35,16 @@ class TencentChannelFunctionTool(FunctionTool):
                 return tool_result(await self.plugin.tool_get_tool_schema(**kwargs))
             if self.name == "txcm_list_guilds":
                 return tool_result(await self.plugin.tool_list_guilds())
+            if self.name == "txcm_guild_channels":
+                return tool_result(await self.plugin.tool_guild_channels(**kwargs))
+            if self.name == "txcm_search_feeds":
+                return tool_result(await self.plugin.tool_search_feeds(**kwargs))
+            if self.name == "txcm_latest_feeds":
+                return tool_result(await self.plugin.tool_latest_feeds(**kwargs))
+            if self.name == "txcm_read_feed":
+                return tool_result(await self.plugin.tool_read_feed(**kwargs))
+            if self.name == "txcm_ask_channel":
+                return tool_result(await self.plugin.tool_ask_channel(**kwargs))
             if self.name == "txcm_call_tool":
                 return tool_result(await self.plugin.tool_call_tool(**kwargs))
             if self.name == "txcm_skill_guide":

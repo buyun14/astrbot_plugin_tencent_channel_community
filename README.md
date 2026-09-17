@@ -189,7 +189,8 @@ python -m pytest tests/ -q
 - `test_mcp_wiring.py` —— MCP 层回归测试，用假 transport 断言 **Token 摆放位置**
   （query 给 initialize/notifications，`Authorization` 只给 tools/call）、
   `notifications/initialized` 被补发、瞬时故障会重试而 `api info not exist` 不重试、
-  空结果不进缓存、schema 配置键可读、工具白名单与分发分支一致。
+  空结果不进缓存、schema 配置键可读、工具白名单与分发分支一致、插件类仍混入网关能力、
+  内置规则段落全部纳入默认输出。
   该文件在缺少 `astrbot` 时自动跳过。
 
 ## CLI 对齐范围
@@ -210,6 +211,7 @@ python -m pytest tests/ -q
 | `error_codes` | retCode 错误码表（8011/153/20047/130000/20006/100707） |
 | `cli` | CLI 命令与 MCP tool 映射 |
 | `endpoint` | 接口端点规则 |
+| `media` | 媒体上传流程与插件边界 |
 | `guild` | 频道管理 |
 | `member` | 成员操作、tiny_id、禁言 |
 | `feed` | 帖子操作 |
@@ -228,13 +230,18 @@ python -m pytest tests/ -q
 
 ```text
 astrbot_plugin_tencent_channel_community/
-├── main.py                 # 插件主体：工具注册、MCP 客户端、指令
+├── main.py                 # 插件类：LLM Tool 注册、语义化工具、/txcm 指令
+├── mcp_client.py           # McpClientMixin：HTTP/JSON-RPC 握手、重试、限速、缓存
+├── device_login.py         # DeviceLoginMixin：设备码扫码授权
+├── cli_reference.py        # 数据表：CLI 命令映射、接口参考
+├── skill_guide.py          # 数据表：内置使用规则文本
+├── constants.py            # 配置键映射、工具白名单、端点与协议默认值
+├── errors.py               # TencentChannelError
 ├── channel_data.py         # 纯函数：解码 / 归一化 / 抽取 / 相关度（可单测）
-├── mcp_protocol.py         # 纯函数：URL/请求头构造、凭据脱敏、失败分类（可单测）
+├── mcp_protocol.py         # 纯函数：URL/请求头构造、凭据脱敏、失败分类、报文解析（可单测）
 ├── tools/
 │   ├── tencent_channel_tools.py
-│   ├── schema.py
-│   └── result.py
+│   └── schema.py
 ├── tests/
 │   ├── test_channel_data.py
 │   ├── test_mcp_protocol.py
@@ -245,6 +252,10 @@ astrbot_plugin_tencent_channel_community/
 ├── requirements.txt
 └── README.md
 ```
+
+插件类通过混入（mixin）组合出完整能力：`mcp_client` / `device_login` 只提供方法，依赖
+`main.py` 插件类提供的 `_cfg()` / `_set_cfg()` / `_save_config()` 与实例属性（会话、缓存、
+限速状态）。混入关系有测试守护，不要把它们从类定义里摘掉。
 
 ## 支持
 

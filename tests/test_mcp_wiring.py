@@ -21,6 +21,10 @@ if str(PLUGIN_DIR.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR.parent))
 
 main = importlib.import_module(f"{PLUGIN_DIR.name}.main")
+constants = importlib.import_module(f"{PLUGIN_DIR.name}.constants")
+device_login = importlib.import_module(f"{PLUGIN_DIR.name}.device_login")
+mcp_client = importlib.import_module(f"{PLUGIN_DIR.name}.mcp_client")
+skill_guide = importlib.import_module(f"{PLUGIN_DIR.name}.skill_guide")
 
 TOKEN = "tok:v1_abc"
 ENDPOINT = "https://example.invalid/mcp"
@@ -103,7 +107,7 @@ def test_tools_call_adds_authorization_header_on_top_of_query_token():
 def test_transient_failure_is_retried_then_succeeds():
     """第一次超时，第二次成功——重试必须真的发生。"""
     inst = make_instance()
-    main.MCP_RETRY_BACKOFF_SECONDS = 0  # 测试里不真的等待
+    mcp_client.MCP_RETRY_BACKOFF_SECONDS = 0  # 测试里不真的等待
     attempts = {"count": 0}
 
     async def fake_post(url, payload, headers=None):
@@ -158,11 +162,11 @@ def test_empty_cache_is_treated_as_miss():
 
 def test_schema_declared_config_keys_are_readable():
     """schema 里声明的键必须在 CONFIG_PATHS 注册，否则 WebUI 设置永远不生效。"""
-    assert main.CONFIG_PATHS["min_request_interval_ms"] == (
+    assert constants.CONFIG_PATHS["min_request_interval_ms"] == (
         "connection_settings",
         "min_request_interval_ms",
     )
-    assert main.CONFIG_PATHS["cache_ttl_seconds"] == (
+    assert constants.CONFIG_PATHS["cache_ttl_seconds"] == (
         "connection_settings",
         "cache_ttl_seconds",
     )
@@ -185,7 +189,7 @@ def test_declared_tool_names_match_registered_tools():
 
     inst.context = FakeContext()
     asyncio.run(inst.initialize())
-    assert set(registered) == set(main.TXCM_LLM_TOOL_NAMES)
+    assert set(registered) == set(constants.TXCM_LLM_TOOL_NAMES)
 
 
 def test_every_declared_tool_has_a_dispatch_branch():
@@ -193,5 +197,23 @@ def test_every_declared_tool_has_a_dispatch_branch():
     text = (PLUGIN_DIR / "tools" / "tencent_channel_tools.py").read_text(
         encoding="utf-8"
     )
-    for name in main.TXCM_LLM_TOOL_NAMES:
+    for name in constants.TXCM_LLM_TOOL_NAMES:
         assert f'"{name}"' in text, f"{name} 缺少分发分支"
+
+
+def test_plugin_class_keeps_gateway_mixins():
+    """拆分出的网关能力（MCP 客户端 / 设备码登录）必须仍混入插件类。"""
+    assert issubclass(main.TencentChannelCommunityPlugin, mcp_client.McpClientMixin)
+    assert issubclass(main.TencentChannelCommunityPlugin, device_login.DeviceLoginMixin)
+
+
+def test_skill_guide_default_output_covers_every_section():
+    """新增 topic 段落却忘了加进默认顺序，会导致该段永远不出现在完整说明里。"""
+    missing = [
+        name
+        for name in skill_guide.SECTIONS
+        if name not in skill_guide._DEFAULT_TOPIC_ORDER
+    ]
+    assert not missing, f"未纳入默认顺序的 topic: {missing}"
+    for name in skill_guide._DEFAULT_TOPIC_ORDER:
+        assert skill_guide.skill_guide_text(name) == skill_guide.SECTIONS[name]

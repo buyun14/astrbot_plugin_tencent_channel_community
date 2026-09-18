@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlsplit
 
-import mcp_protocol as mp
+from astrbot_plugin_tencent_channel_community.app.utils import mcp_protocol as mp
 
 ENDPOINT = "https://graph.qq.com/mcp_gateway/open_platform_agent_mcp/mcp"
 TOKEN = "bot:v1_exampleT0ken+/="

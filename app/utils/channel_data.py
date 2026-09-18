@@ -278,7 +278,7 @@ class CommentContent:
     mentions: list[dict[str, str]] = field(default_factory=list)
 
 
-_FACE_MAP_PATH = Path(__file__).resolve().parent / "assets" / "qq_face_map.json"
+_FACE_MAP_PATH = Path(__file__).resolve().parents[2] / "assets" / "qq_face_map.json"
 _face_maps: dict[str, dict[str, str]] | None = None
 
 

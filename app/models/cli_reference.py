@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .constants import (
+from ..core.constants import (
     DEFAULT_DEVICE_CODE_REQUEST_URL,
     DEFAULT_DEVICE_TOKEN_POLL_URL,
     DEFAULT_MCP_ENDPOINT,

@@ -28,6 +28,8 @@
 - `main.py`（2692 行）按职责拆分为 `mcp_client` / `device_login` / `constants` / `cli_reference` / `skill_guide` / `errors`，行为等价（AST 逐函数比对）
 - 官方用法经内置本地化技能下发，不再注册自定义读取工具；`/txcm guide` 聚焦插件踩坑附录；
   `txcm_call_tool` / `txcm_call_cli_command` 描述注入鉴权要点
+- 根目录按 FastAPI 风格归置：模块归入 `app/{core,models,services,utils}`，`tools/`、
+  `metadata.yaml`、`_conf_schema.json`、`requirements.txt`、`skills/` 因加载器约定留根
 - 配置项与指令用法保持兼容
 
 ## v0.3.0 (2026-08-18)

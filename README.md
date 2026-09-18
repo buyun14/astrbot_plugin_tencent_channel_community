@@ -82,25 +82,20 @@ python -m pytest tests/ -q
 ```text
 astrbot_plugin_tencent_channel_community/
 ├── main.py                 # 插件类：LLM 工具注册、/txcm 指令、语义化与检索工具
-├── mcp_client.py           # McpClientMixin：握手、重试、限速、缓存、Skill 版本检测
-├── device_login.py         # DeviceLoginMixin：设备码扫码授权
-├── cli_reference.py        # CLI 命令映射与接口参考数据表
-├── skill_guide.py          # 踩坑附录文本（/txcm guide、txcm_skill_read 数据源）
-├── skill_source.py         # 官方 Skill 下载 / 缓存 / 主题检索
-├── channel_data.py         # 纯函数：解码 / 归一化 / 抽取 / 相关度（可单测）
-├── mcp_protocol.py         # 纯函数：URL/请求头构造、脱敏、失败分类（可单测）
-├── constants.py            # 配置键映射、工具白名单、端点与协议默认值
-├── errors.py               # TencentChannelError
+├── metadata.yaml           # AstrBot 插件元数据（加载器约定，留根）
+├── _conf_schema.json       # WebUI 配置 schema（约定留根）
+├── requirements.txt        # 依赖声明（约定留根）
 ├── assets/
 │   └── qq_face_map.json    # 官方表情 id → 名字表（来源见文件内注释）
-├── tools/
-│   ├── tencent_channel_tools.py
-│   └── schema.py
-├── tests/                  # pytest：纯函数 + 接线回归
-├── conftest.py
-├── metadata.yaml
-├── _conf_schema.json
-├── requirements.txt
+├── skills/                 # 内置本地化技能（AstrBot 原生索引，约定留根）
+│   └── tencent-channel-community/
+├── app/                    # FastAPI 风格分层包
+│   ├── core/               # constants.py  errors.py
+│   ├── models/             # cli_reference.py  skill_guide.py（知识数据表）
+│   ├── services/           # mcp_client.py  device_login.py  skill_source.py  skill_localize.py
+│   └── utils/              # channel_data.py  mcp_protocol.py（纯函数，可单测）
+├── tools/                  # LLM 工具定义（tencent_channel_tools.py  schema.py）
+├── tests/                  # pytest：纯函数 + 接线回归（conftest.py 在此）
 └── CHANGELOG.md
 ```
 

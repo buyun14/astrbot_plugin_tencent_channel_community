@@ -22,7 +22,7 @@ from typing import Any
 
 import aiohttp
 
-from .constants import SKILL_UPDATE_CHECK_URL
+from ..core.constants import SKILL_UPDATE_CHECK_URL
 
 CHECK_TTL_SECONDS = 24 * 3600
 READ_CHAR_LIMIT = 6000

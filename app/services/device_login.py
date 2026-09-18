@@ -19,9 +19,9 @@ from typing import Any
 
 from astrbot.api.event import AstrMessageEvent
 
-from . import mcp_protocol
-from .constants import POLL_DEVICE_TOKEN_OIDB, REQUEST_DEVICE_CODE_OIDB
-from .errors import TencentChannelError
+from ..core.constants import POLL_DEVICE_TOKEN_OIDB, REQUEST_DEVICE_CODE_OIDB
+from ..core.errors import TencentChannelError
+from ..utils import mcp_protocol
 
 
 class DeviceLoginMixin:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 
-import channel_data as cd
+from astrbot_plugin_tencent_channel_community.app.utils import channel_data as cd
 
 # ---- 真实样本 -------------------------------------------------------------- #
 GUILD_NAME_B64 = "5ZCv57+U5rmW55WULeilv+WMl+W3peS4muWkp+Wtpg=="  # 启翔湖畔-西北工业大学

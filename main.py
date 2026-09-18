@@ -15,20 +15,21 @@ from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
 
-from . import channel_data as cdata
-from . import mcp_protocol, skill_localize, skill_source
-from .cli_reference import CLI_COMMANDS, ENDPOINT_GUIDE
-from .constants import (
+from .app.core.constants import (
     CONFIG_DEFAULTS,
     CONFIG_PATHS,
     DEFAULT_GUILD_LIST_ARGUMENTS,
     PLUGIN_NAME,
     TXCM_LLM_TOOL_NAMES,
 )
-from .device_login import DeviceLoginMixin
-from .errors import TencentChannelError
-from .mcp_client import McpClientMixin
-from .skill_guide import skill_guide_text
+from .app.core.errors import TencentChannelError
+from .app.models.cli_reference import CLI_COMMANDS, ENDPOINT_GUIDE
+from .app.models.skill_guide import skill_guide_text
+from .app.services import skill_localize, skill_source
+from .app.services.device_login import DeviceLoginMixin
+from .app.services.mcp_client import McpClientMixin
+from .app.utils import channel_data as cdata
+from .app.utils import mcp_protocol
 from .tools import TencentChannelFunctionTool
 from .tools.schema import (
     boolean_param,

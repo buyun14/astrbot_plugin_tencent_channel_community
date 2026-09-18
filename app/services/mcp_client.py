@@ -22,8 +22,7 @@ from typing import Any
 import aiohttp
 from astrbot.api import logger
 
-from . import mcp_protocol
-from .constants import (
+from ..core.constants import (
     DEFAULT_MCP_ENDPOINT,
     HIGH_RISK_TOOLS,
     PLUGIN_NAME,
@@ -32,7 +31,8 @@ from .constants import (
     SKILL_VERSION,
     WRITE_TOOLS,
 )
-from .errors import TencentChannelError
+from ..core.errors import TencentChannelError
+from ..utils import mcp_protocol
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 # 网关对凭证位置的要求与方法相关（实测）：

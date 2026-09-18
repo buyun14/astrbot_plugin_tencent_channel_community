@@ -11,7 +11,9 @@ PLUGIN_DIR = pathlib.Path(__file__).resolve().parents[1]
 if str(PLUGIN_DIR.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR.parent))
 
-skill_localize = importlib.import_module(f"{PLUGIN_DIR.name}.skill_localize")
+skill_localize = importlib.import_module(
+    f"{PLUGIN_DIR.name}.app.services.skill_localize"
+)
 
 
 SKILL_MD = (

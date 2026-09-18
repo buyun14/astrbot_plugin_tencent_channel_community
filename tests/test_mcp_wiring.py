@@ -21,10 +21,10 @@ if str(PLUGIN_DIR.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR.parent))
 
 main = importlib.import_module(f"{PLUGIN_DIR.name}.main")
-constants = importlib.import_module(f"{PLUGIN_DIR.name}.constants")
-device_login = importlib.import_module(f"{PLUGIN_DIR.name}.device_login")
-mcp_client = importlib.import_module(f"{PLUGIN_DIR.name}.mcp_client")
-skill_guide = importlib.import_module(f"{PLUGIN_DIR.name}.skill_guide")
+constants = importlib.import_module(f"{PLUGIN_DIR.name}.app.core.constants")
+device_login = importlib.import_module(f"{PLUGIN_DIR.name}.app.services.device_login")
+mcp_client = importlib.import_module(f"{PLUGIN_DIR.name}.app.services.mcp_client")
+skill_guide = importlib.import_module(f"{PLUGIN_DIR.name}.app.models.skill_guide")
 
 TOKEN = "tok:v1_abc"
 ENDPOINT = "https://example.invalid/mcp"

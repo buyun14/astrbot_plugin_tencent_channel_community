@@ -2,620 +2,42 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import datetime
 import json
-import time
-import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
 import aiohttp
-
 import astrbot.api.message_components as Comp
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger, sp
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
-from astrbot.api.star import Context, Star, register
-from astrbot.core import AstrBotConfig, sp
+from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
 
+from .app.core.constants import (
+    CONFIG_DEFAULTS,
+    CONFIG_PATHS,
+    DEFAULT_GUILD_LIST_ARGUMENTS,
+    PLUGIN_NAME,
+    TXCM_LLM_TOOL_NAMES,
+    UNAVAILABLE_TOOLS,
+)
+from .app.core.errors import TencentChannelError
+from .app.models.cli_reference import CLI_COMMANDS, ENDPOINT_GUIDE
+from .app.models.skill_guide import skill_guide_text
+from .app.services import skill_localize, skill_source
+from .app.services.device_login import DeviceLoginMixin
+from .app.services.mcp_client import McpClientMixin
+from .app.utils import channel_data as cdata
+from .app.utils import mcp_protocol
 from .tools import TencentChannelFunctionTool
-from .tools.schema import object_parameters, string_param
-
-try:
-    from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
-except ImportError:
-    get_astrbot_plugin_data_path = None
-
-
-PLUGIN_NAME = "astrbot_plugin_tencent_channel_community"
-PLUGIN_VERSION = "v0.3.0"
-DEFAULT_MCP_ENDPOINT = "https://graph.qq.com/mcp_gateway/open_platform_agent_mcp/mcp"
-DEFAULT_AUTH_BASE_URL = (
-    "https://connect.qq.com/http2rpc/gotrpc/noauth/"
-    "trpc.group_pro.open_developer_console.OpenDeveloperConsoleV2Trpc"
+from .tools.schema import (
+    boolean_param,
+    integer_param,
+    object_parameters,
+    string_param,
 )
-DEFAULT_DEVICE_CODE_REQUEST_URL = f"{DEFAULT_AUTH_BASE_URL}/RequestDeviceCode"
-DEFAULT_DEVICE_TOKEN_POLL_URL = f"{DEFAULT_AUTH_BASE_URL}/PollDeviceToken"
-MCP_PROTOCOL_VERSION = "2024-11-05"
-REQUEST_DEVICE_CODE_OIDB = {"uint32_command": "0x995b", "uint32_service_type": "1"}
-POLL_DEVICE_TOKEN_OIDB = {"uint32_command": "0x995d", "uint32_service_type": "1"}
-TXCM_LLM_TOOL_NAMES = (
-    "txcm_status",
-    "txcm_list_tools",
-    "txcm_get_tool_schema",
-    "txcm_list_guilds",
-    "txcm_call_tool",
-    "txcm_skill_guide",
-    "txcm_list_cli_commands",
-    "txcm_get_cli_mapping",
-    "txcm_call_cli_command",
-    "txcm_endpoint_guide",
-)
-
-CONFIG_PATHS = {
-    "qq_ai_connect_token": ("account_settings", "qq_ai_connect_token"),
-    "mcp_endpoint": ("connection_settings", "mcp_endpoint"),
-    "request_timeout_seconds": ("connection_settings", "request_timeout_seconds"),
-    "proxy": ("connection_settings", "proxy"),
-    "enable_write_tools": ("tool_settings", "enable_write_tools"),
-    "enable_high_risk_tools": ("tool_settings", "enable_high_risk_tools"),
-    "cache_tool_schema": ("tool_settings", "cache_tool_schema"),
-    "device_code_request_url": ("login_settings", "device_code_request_url"),
-    "device_token_poll_url": ("login_settings", "device_token_poll_url"),
-    "login_timeout_seconds": ("login_settings", "login_timeout_seconds"),
-    "login_poll_interval_seconds": ("login_settings", "login_poll_interval_seconds"),
-    "login_request_payload_json": ("login_settings", "login_request_payload_json"),
-    "login_poll_payload_json": ("login_settings", "login_poll_payload_json"),
-}
-
-CONFIG_DEFAULTS = {
-    "qq_ai_connect_token": "",
-    "mcp_endpoint": DEFAULT_MCP_ENDPOINT,
-    "request_timeout_seconds": 30,
-    "proxy": "",
-    "enable_write_tools": False,
-    "enable_high_risk_tools": False,
-    "cache_tool_schema": True,
-    "device_code_request_url": DEFAULT_DEVICE_CODE_REQUEST_URL,
-    "device_token_poll_url": DEFAULT_DEVICE_TOKEN_POLL_URL,
-    "login_timeout_seconds": 420,
-    "login_poll_interval_seconds": 3,
-    "login_request_payload_json": "{}",
-    "login_poll_payload_json": "{}",
-}
-
-HIGH_RISK_TOOLS = {
-    "del_feed",
-    "delete_channel",
-    "kick_guild_member",
-    "leave_guild",
-    "modify_member_shut_up",
-    "do_comment",
-    "do_reply",
-    "deal_notice",
-}
-
-WRITE_TOOLS = {
-    "alter_feed",
-    "apply_media_upload",
-    "batch_essence",
-    "change_role_member",
-    "create_channel",
-    "create_guild",
-    "create_guild_role_group",
-    "deal_notice",
-    "del_feed",
-    "delete_channel",
-    "do_comment",
-    "do_feed_prefer",
-    "do_like",
-    "do_reply",
-    "join_guild",
-    "kick_guild_member",
-    "leave_guild",
-    "modify_channel",
-    "modify_guild_number",
-    "modify_guild_role_group",
-    "modify_member_shut_up",
-    "move_feed",
-    "publish_feed",
-    "push_essence_feed",
-    "push_group_normal_dm_msg",
-    "push_qq_msg",
-    "report_user_guild_read_digest",
-    "top_feed_action",
-    "update_guild_info",
-    "update_join_guild_setting",
-    "upload_guild_avatar",
-    "upload_guild_avatar_pre",
-}
-
-DEFAULT_GUILD_LIST_ARGUMENTS = {
-    "bytesCookie": "",
-    "filter": {
-        "filter": {
-            "uint32MemberNum": 1,
-            "uint32GuildName": 1,
-            "uint32Profile": 1,
-            "uint32FaceSeq": 1,
-            "uint32GuildNumber": 1,
-            "uint32CreateTime": 1,
-        },
-        "userFilter": {"uint32Role": 1},
-    },
-}
-
-CLI_COMMANDS: dict[str, dict[str, Any]] = {
-    "feed.get-guild-feeds": {
-        "tool": "get_guild_feeds",
-        "group": "read",
-        "risk": "read",
-        "description": "获取腾讯频道主页帖子",
-    },
-    "feed.get-channel-timeline-feeds": {
-        "tool": "get_channel_timeline_feeds",
-        "group": "read",
-        "risk": "read",
-        "description": "获取版块帖子列表",
-    },
-    "feed.get-feed-detail": {
-        "tool": "get_feed_detail",
-        "group": "read",
-        "risk": "read",
-        "description": "查看帖子详情",
-    },
-    "feed.get-feed-comments": {
-        "tool": "get_feed_comments",
-        "group": "read",
-        "risk": "read",
-        "description": "查看帖子评论",
-    },
-    "feed.search-guild-feeds": {
-        "tool": "get_search_guild_feed",
-        "group": "read",
-        "risk": "read",
-        "description": "搜索频道内帖子",
-    },
-    "feed.get-feed-share-url": {
-        "tool": "get_share_url",
-        "group": "read",
-        "risk": "read",
-        "description": "获取帖子分享短链",
-        "note": "CLI 会本地编码 businessParam；插件只暴露对应 MCP tool。",
-    },
-    "feed.get-notices": {
-        "tool": "get_interact_notice",
-        "group": "read",
-        "risk": "read",
-        "description": "查看互动消息",
-    },
-    "feed.get-next-page-replies": {
-        "tool": "get_next_page_replies",
-        "group": "read",
-        "risk": "read",
-        "description": "查看更多评论回复",
-    },
-    "feed.publish-feed": {
-        "tool": "publish_feed",
-        "group": "write",
-        "risk": "write",
-        "description": "发表帖子",
-    },
-    "feed.del-feed": {
-        "tool": "del_feed",
-        "group": "write",
-        "risk": "high-risk-write",
-        "description": "删除帖子",
-    },
-    "feed.do-comment": {
-        "tool": "do_comment",
-        "group": "write",
-        "risk": "write",
-        "description": "发表或删除评论",
-    },
-    "feed.do-reply": {
-        "tool": "do_reply",
-        "group": "write",
-        "risk": "write",
-        "description": "发表或删除回复",
-    },
-    "feed.do-like": {
-        "tool": "do_like",
-        "group": "write",
-        "risk": "write",
-        "description": "评论或回复点赞",
-    },
-    "feed.do-feed-prefer": {
-        "tool": "do_feed_prefer",
-        "group": "write",
-        "risk": "write",
-        "description": "帖子点赞或取消",
-    },
-    "feed.alter-feed": {
-        "tool": "alter_feed",
-        "group": "write",
-        "risk": "write",
-        "description": "编辑帖子",
-    },
-    "feed.top-feed": {
-        "tool": "top_feed_action",
-        "group": "write",
-        "risk": "write",
-        "description": "帖子置顶或取消置顶",
-    },
-    "feed.set-feed-essence": {
-        "tool": "batch_essence",
-        "group": "write",
-        "risk": "write",
-        "description": "设置或取消精华",
-    },
-    "feed.push-essence-feed": {
-        "tool": "push_essence_feed",
-        "group": "write",
-        "risk": "write",
-        "description": "推送精华帖通知",
-    },
-    "feed.move-feed": {
-        "tool": "move_feed",
-        "group": "write",
-        "risk": "write",
-        "description": "移动帖子到其他版块",
-    },
-    "feed.quick-publish": {
-        "tool": "",
-        "group": "shortcut",
-        "risk": "write",
-        "description": "选择频道和版块后一键发帖",
-        "note": "CLI 本地多步流程；插件侧请用列表工具选择目标后调用 publish_feed。",
-    },
-    "feed.search-and-comment": {
-        "tool": "",
-        "group": "shortcut",
-        "risk": "write",
-        "description": "搜索帖子并评论",
-        "note": "CLI 本地多步流程；插件侧请组合 get_search_guild_feed 与 do_comment。",
-    },
-    "feed.delete-and-mute": {
-        "tool": "",
-        "group": "shortcut",
-        "risk": "high-risk-write",
-        "description": "搜帖删帖并禁言",
-        "note": "CLI 本地高风险流程；插件侧请显式确认后组合 del_feed 与 modify_member_shut_up。",
-    },
-    "feed.latest-feeds-detail": {
-        "tool": "",
-        "group": "shortcut",
-        "risk": "read",
-        "description": "获取最新帖子详情",
-        "note": "CLI 本地多步流程；插件侧请组合 get_guild_feeds 与 get_feed_detail。",
-    },
-    "feed.hot-feeds-detail": {
-        "tool": "",
-        "group": "shortcut",
-        "risk": "read",
-        "description": "获取热门帖子详情",
-        "note": "CLI 本地多步流程；插件侧请组合 get_guild_feeds 与 get_feed_detail。",
-    },
-    "manage.get-guild-info": {
-        "tool": "get_guild_info",
-        "group": "query",
-        "risk": "read",
-        "description": "查看腾讯频道资料",
-    },
-    "manage.get-my-join-guild-info": {
-        "tool": "get_my_join_guild_info",
-        "group": "query",
-        "risk": "read",
-        "description": "查看我的腾讯频道列表",
-    },
-    "manage.get-user-info": {
-        "tool": "get_user_info",
-        "group": "query",
-        "risk": "read",
-        "description": "查看用户资料",
-    },
-    "manage.get-guild-member-list": {
-        "tool": "get_guild_member_list",
-        "group": "query",
-        "risk": "read",
-        "description": "查看成员列表",
-    },
-    "manage.guild-member-search": {
-        "tool": "guild_member_search",
-        "group": "query",
-        "risk": "read",
-        "description": "按昵称搜索成员",
-    },
-    "manage.get-guild-channel-list": {
-        "tool": "get_guild_channel_list",
-        "group": "query",
-        "risk": "read",
-        "description": "查看版块列表",
-    },
-    "manage.search-guild-content": {
-        "tool": "search_guild_content",
-        "group": "query",
-        "risk": "read",
-        "description": "搜索腾讯频道、帖子或作者",
-    },
-    "manage.get-join-guild-setting": {
-        "tool": "get_join_guild_setting",
-        "group": "query",
-        "risk": "read",
-        "description": "查看腾讯频道加入设置",
-    },
-    "manage.get-guild-share-url": {
-        "tool": "get_share_url",
-        "group": "query",
-        "risk": "read",
-        "description": "获取腾讯频道分享短链",
-    },
-    "manage.get-share-info": {
-        "tool": "get_share_info",
-        "group": "query",
-        "risk": "read",
-        "description": "解析 pd.qq.com 分享链接",
-    },
-    "manage.kick-guild-member": {
-        "tool": "kick_guild_member",
-        "group": "write",
-        "risk": "high-risk-write",
-        "description": "踢出成员",
-    },
-    "manage.modify-member-shut-up": {
-        "tool": "modify_member_shut_up",
-        "group": "write",
-        "risk": "write",
-        "description": "禁言或解禁成员",
-    },
-    "manage.update-guild-info": {
-        "tool": "update_guild_info",
-        "group": "write",
-        "risk": "write",
-        "description": "修改腾讯频道名称或简介",
-    },
-    "manage.modify-guild-number": {
-        "tool": "modify_guild_number",
-        "group": "write",
-        "risk": "write",
-        "description": "修改腾讯频道号",
-    },
-    "manage.create-guild-role-group": {
-        "tool": "create_guild_role_group",
-        "group": "write",
-        "risk": "write",
-        "description": "创建身份组",
-    },
-    "manage.modify-guild-role-group": {
-        "tool": "modify_guild_role_group",
-        "group": "write",
-        "risk": "write",
-        "description": "修改身份组",
-    },
-    "manage.add-role-members": {
-        "tool": "change_role_member",
-        "group": "write",
-        "risk": "write",
-        "description": "向身份组添加成员",
-    },
-    "manage.remove-role-members": {
-        "tool": "change_role_member",
-        "group": "write",
-        "risk": "high-risk-write",
-        "description": "从身份组移除成员",
-    },
-    "manage.join-guild": {
-        "tool": "join_guild",
-        "group": "write",
-        "risk": "write",
-        "description": "加入腾讯频道",
-    },
-    "manage.create-channel": {
-        "tool": "create_channel",
-        "group": "write",
-        "risk": "write",
-        "description": "创建子版块",
-    },
-    "manage.delete-channel": {
-        "tool": "delete_channel",
-        "group": "write",
-        "risk": "high-risk-write",
-        "description": "删除版块",
-    },
-    "manage.modify-channel": {
-        "tool": "modify_channel",
-        "group": "write",
-        "risk": "write",
-        "description": "修改版块名称",
-    },
-    "manage.upload-guild-avatar": {
-        "tool": "upload_guild_avatar",
-        "group": "write",
-        "risk": "write",
-        "description": "修改腾讯频道头像",
-    },
-    "manage.create-theme-private-guild": {
-        "tool": "create_guild",
-        "group": "write",
-        "risk": "write",
-        "description": "创建公开或私密频道",
-    },
-    "manage.add-admin": {
-        "tool": "change_role_member",
-        "group": "write",
-        "risk": "write",
-        "description": "设置超级管理员",
-        "note": "CLI 使用 change_role_member 并写死超级管理员 roleId=2。",
-    },
-    "manage.remove-admin": {
-        "tool": "change_role_member",
-        "group": "write",
-        "risk": "high-risk-write",
-        "description": "移除超级管理员",
-        "note": "CLI 使用 change_role_member 并写死超级管理员 roleId=2。",
-    },
-    "manage.push-group-dm-msg": {
-        "tool": "push_group_normal_dm_msg",
-        "group": "write",
-        "risk": "write",
-        "description": "发送频道私信",
-    },
-    "manage.update-join-guild-setting": {
-        "tool": "update_join_guild_setting",
-        "group": "write",
-        "risk": "write",
-        "description": "修改腾讯频道加入设置",
-    },
-    "manage.leave-guild": {
-        "tool": "leave_guild",
-        "group": "write",
-        "risk": "high-risk-write",
-        "description": "退出腾讯频道",
-    },
-    "manage.notices-on": {
-        "tool": "",
-        "group": "write",
-        "risk": "write",
-        "description": "开启频道消息通知",
-        "note": "CLI 本地订阅/OpenClaw 推送流程；AstrBot 插件不启动 CLI daemon。",
-    },
-    "manage.notices-off": {
-        "tool": "",
-        "group": "write",
-        "risk": "write",
-        "description": "关闭频道消息通知",
-        "note": "CLI 本地订阅/OpenClaw 推送流程；AstrBot 插件不启动 CLI daemon。",
-    },
-    "manage.notices-status": {
-        "tool": "",
-        "group": "query",
-        "risk": "read",
-        "description": "查看频道消息通知状态",
-        "note": "CLI 读取本地 ~/.qqcli/subscription 状态。",
-    },
-    "manage.check-notices": {
-        "tool": "",
-        "group": "query",
-        "risk": "read",
-        "description": "增量检查频道通知",
-        "note": "CLI 本地流程会组合 query_user_guild_digest、get_interact_notice、get_notice_list 和 query_normal_dm_list。",
-    },
-    "manage.subscribe-notices": {
-        "tool": "",
-        "group": "write",
-        "risk": "write",
-        "description": "开启频道消息通知",
-        "note": "notices-on 的兼容别名。",
-    },
-    "manage.unsubscribe-notices": {
-        "tool": "",
-        "group": "write",
-        "risk": "write",
-        "description": "关闭频道消息通知",
-        "note": "notices-off 的兼容别名。",
-    },
-    "manage.check-new-notices": {
-        "tool": "",
-        "group": "query",
-        "risk": "read",
-        "description": "检查新的频道通知",
-        "note": "check-notices 的兼容别名。",
-    },
-    "manage.get-recent-notices": {
-        "tool": "",
-        "group": "query",
-        "risk": "read",
-        "description": "获取最近的通知记录",
-        "note": "CLI 读取本地通知记录。",
-    },
-    "manage.deal-notice": {
-        "tool": "deal_notice",
-        "group": "write",
-        "risk": "write",
-        "description": "处理系统通知",
-    },
-    "manage.notify-daemon": {
-        "tool": "",
-        "group": "write",
-        "risk": "write",
-        "description": "启动后台通知检查服务",
-        "note": "CLI 本地 daemon；AstrBot 插件不启动外部进程。",
-    },
-    "manage.search-and-join": {
-        "tool": "",
-        "group": "shortcut",
-        "risk": "write",
-        "description": "搜索频道并加入",
-        "note": "CLI 本地多步流程；插件侧请组合 search_guild_content 与 join_guild。",
-    },
-}
-
-ENDPOINT_GUIDE: dict[str, dict[str, Any]] = {
-    "login_request_device_code": {
-        "method": "POST",
-        "url": DEFAULT_DEVICE_CODE_REQUEST_URL,
-        "headers": {"X-Oidb": REQUEST_DEVICE_CODE_OIDB},
-        "body": {"device_id": "<uuid>"},
-        "description": "申请扫码/授权链接设备码。",
-    },
-    "login_poll_device_token": {
-        "method": "POST",
-        "url": DEFAULT_DEVICE_TOKEN_POLL_URL,
-        "headers": {"X-Oidb": POLL_DEVICE_TOKEN_OIDB},
-        "body": {"device_id": "<uuid>", "device_code": "<device_code>"},
-        "description": "轮询设备授权结果，成功时返回 Token。",
-    },
-    "mcp_json_rpc": {
-        "method": "POST",
-        "url": DEFAULT_MCP_ENDPOINT,
-        "headers": {
-            "Authorization": "Bearer <token>",
-            "Content-Type": "application/json",
-            "X-Forwarded-Method": "POST",
-        },
-        "body": {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "<tool_name>", "arguments": {}},
-        },
-        "description": "所有 feed/manage 原子业务能力共用的 MCP JSON-RPC 端点。",
-    },
-    "media_sliceupload": {
-        "method": "POST",
-        "url": "http://<upload_host>:<upload_port>/sliceupload",
-        "description": (
-            "发帖/改帖上传图片或视频时由 apply_media_upload 返回动态上传地址，"
-            "请求体是 CLI 内部编码的分片上传二进制协议。"
-        ),
-    },
-    "skill_update_check": {
-        "method": "HEAD",
-        "url": "https://connect.qq.com/skills/tencent-channel-community.zip",
-        "description": "官方 Skill/CLI 更新检测端点，读取 x-cos-meta-tcc-version 等响应头。",
-    },
-}
-
-SKILL_UPDATE_CHECK_URL = (
-    "https://connect.qq.com/skills/tencent-channel-community.zip"
-)
-
-# 官方 tencent-channel-community Skill 版本，来源为 SKILL.md frontmatter version。
-# 升级官方 Skill 后需手动同步此处，否则 /txcm status 的版本比对结果会失真。
-SKILL_VERSION = "1.1.5"
-
-
-class TencentChannelError(Exception):
-    """腾讯频道接口错误。
-
-    Args:
-        message: 可展示给管理员的错误信息。
-        data: 上游返回的原始数据。
-    """
-
-    def __init__(self, message: str, data: Any | None = None) -> None:
-        super().__init__(message)
-        self.data = data
 
 
 def _json_dumps(data: Any, limit: int = 4000) -> str:
@@ -625,52 +47,23 @@ def _json_dumps(data: Any, limit: int = 4000) -> str:
     return text[:limit] + "\n... 已截断 ..."
 
 
-def _normalize_tool_name(name: str) -> str:
-    return str(name or "").strip().replace("-", "_")
-_RATE_LIMIT_MARKERS = (
-    "请求频率过高",
-    "频率限制",
-    "频率受限",
-    "接口调用已超过申请的频率上限",
-    "too many requests",
-    "rate limit",
-    "rate-limited",
-)
-
-
-def _is_rate_limit_payload(parsed: Any) -> bool:
-    """判断 MCP tool 错误是否为 retCode 153 限流，尽量减少误判。"""
-    if isinstance(parsed, dict):
-        if str(parsed.get("code") or "") == "153":
-            return True
-        message = parsed.get("message")
-        if isinstance(message, dict):
-            text = json.dumps(message, ensure_ascii=False)
-        else:
-            text = str(message or parsed or "")
-    else:
-        text = str(parsed or "")
-    lower = text.lower()
-    return any(marker in lower for marker in _RATE_LIMIT_MARKERS)
-
-
-def _parse_json_text(text: str, *, fallback: Any = None) -> Any:
-    raw = str(text or "").strip()
-    if not raw:
-        return fallback
+def _format_timestamp(value: Any) -> str:
+    """把秒级时间戳格式化成东八区可读时间（空值/非法值返回空串）。"""
+    seconds = cdata.as_int(value)
+    if seconds <= 0:
+        return ""
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return fallback
+        moment = datetime.datetime.fromtimestamp(
+            seconds, tz=datetime.timezone(datetime.timedelta(hours=8))
+        )
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return moment.strftime("%Y-%m-%d %H:%M")
 
 
-@register(
-    PLUGIN_NAME,
-    "腾讯频道社区管理工具",
-    "通过 tencent-channel-cli 接口管理 QQ 频道，内置使用规则并注册 LLM Tools。",
-    PLUGIN_VERSION,
-)
-class TencentChannelCommunityPlugin(Star):
+# 插件元数据以 metadata.yaml 为准（优先级高于已废弃的 @register 装饰器），
+# 这里不再重复声明名称/描述/版本，避免两处漂移。
+class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None):
         super().__init__(context)
         self.config = config or {}
@@ -678,6 +71,9 @@ class TencentChannelCommunityPlugin(Star):
         self._server_info: dict[str, Any] | None = None
         self._tool_cache: list[dict[str, Any]] | None = None
         self._login_task: asyncio.Task | None = None
+        self._throttle_lock = asyncio.Lock()
+        self._last_call_at = 0.0
+        self._data_cache: dict[str, tuple[float, Any]] = {}
 
     async def initialize(self) -> None:
         self.context.add_llm_tools(
@@ -706,14 +102,118 @@ class TencentChannelCommunityPlugin(Star):
             ),
             TencentChannelFunctionTool(
                 name="txcm_list_guilds",
-                description="获取当前账号已加入的腾讯频道列表。",
+                description="获取当前账号已加入的腾讯频道列表（频道名/频道号已自动解码）。",
                 parameters=object_parameters({}),
+                plugin=self,
+            ),
+            TencentChannelFunctionTool(
+                name="txcm_guild_channels",
+                description=(
+                    "列出某个频道的版块（子频道）列表，返回 channel_id 与版块名。"
+                    "guild 可传频道 id、频道号或名称片段。"
+                ),
+                parameters=object_parameters(
+                    {
+                        "guild": string_param(
+                            "频道 id / 频道号 / 名称片段，例如「启翔湖畔」。"
+                        )
+                    },
+                    required=["guild"],
+                ),
+                plugin=self,
+            ),
+            TencentChannelFunctionTool(
+                name="txcm_search_feeds",
+                description=(
+                    "按关键词搜索频道内的帖子，返回标题/正文/作者/时间/评论数/版块。"
+                    "搜索比逐页翻更准，优先用它；结果已按相关度排序。"
+                ),
+                parameters=object_parameters(
+                    {
+                        "guild": string_param("频道 id / 频道号 / 名称片段。"),
+                        "keyword": string_param(
+                            "搜索关键词，例如「安全防卫学 上课地点」。"
+                        ),
+                        "limit": integer_param("返回条数，默认 10，最大 30。"),
+                    },
+                    required=["guild", "keyword"],
+                ),
+                plugin=self,
+            ),
+            TencentChannelFunctionTool(
+                name="txcm_latest_feeds",
+                description="拉取频道主页帖子流（热门或最新），用于看近期动态。",
+                parameters=object_parameters(
+                    {
+                        "guild": string_param("频道 id / 频道号 / 名称片段。"),
+                        "count": integer_param("返回条数，默认 10，最大 30。"),
+                        "order": string_param("hot=热门（默认），new=最新。"),
+                    },
+                    required=["guild"],
+                ),
+                plugin=self,
+            ),
+            TencentChannelFunctionTool(
+                name="txcm_read_feed",
+                description=(
+                    "读某条帖子的详情和评论（评论正文会自动解码）。"
+                    "评论默认自动回填；特殊情况下可显式提供 guild / channel_id。"
+                ),
+                parameters=object_parameters(
+                    {
+                        "feed_id": string_param("帖子 id（feed_id）。"),
+                        "guild": string_param(
+                            "可选。频道 id / 频道号 / 名称片段，评论接口需要。"
+                        ),
+                        "channel_id": string_param("可选。子频道 id，评论接口需要。"),
+                        "with_comments": boolean_param("是否抓取评论，默认 true。"),
+                    },
+                    required=["feed_id"],
+                ),
+                plugin=self,
+            ),
+            TencentChannelFunctionTool(
+                name="txcm_do_comment",
+                description=(
+                    "给指定帖子发表评论（type=1）。自动获取原帖 StFeed 并组装请求，"
+                    "content 传纯文本即可（插件自动 base64）；poster_tinyid 可选，"
+                    "未填则省略评论人信息。删除评论（type=0/2）属高风险，不在本工具用途内。"
+                ),
+                parameters=object_parameters(
+                    {
+                        "feed_id": string_param("目标帖子 id。"),
+                        "content": string_param("评论正文，纯文本。"),
+                        "poster_tinyid": string_param(
+                            "可选。评论人 tinyid（>10 位数字），一般可不填。"
+                        ),
+                    },
+                    required=["feed_id", "content"],
+                ),
+                plugin=self,
+            ),
+            TencentChannelFunctionTool(
+                name="txcm_ask_channel",
+                description=(
+                    "在频道里问一个问题：自动搜索相关帖子 → 读评论 → 按相关度排序，"
+                    "返回带出处（作者+时间）的回答素材。适合「某课在哪上」这类事实性问题。"
+                ),
+                parameters=object_parameters(
+                    {
+                        "guild": string_param("频道 id / 频道号 / 名称片段。"),
+                        "question": string_param(
+                            "要问的问题，例如「大学生安全防卫学上课地点」。"
+                        ),
+                        "limit": integer_param("最多深挖几条帖子，默认 5，最大 8。"),
+                    },
+                    required=["guild", "question"],
+                ),
                 plugin=self,
             ),
             TencentChannelFunctionTool(
                 name="txcm_call_tool",
                 description=(
                     "调用腾讯频道 MCP 原始工具。arguments_json 必须是 JSON object 字符串。"
+                    "鉴权由插件自动处理：8011/130001=接口或工具不存在，151=登录态失效需 /txcm login。"
                     "写操作和高风险操作受插件配置开关限制。"
                 ),
                 parameters=object_parameters(
@@ -724,18 +224,6 @@ class TencentChannelCommunityPlugin(Star):
                         ),
                     },
                     required=["tool_name", "arguments_json"],
-                ),
-                plugin=self,
-            ),
-            TencentChannelFunctionTool(
-                name="txcm_skill_guide",
-                description="读取内置腾讯频道 Skill 使用规则，帮助模型选择工具和控制风险。",
-                parameters=object_parameters(
-                    {
-                        "topic": string_param(
-                            "可选。guild/member/feed/notification/risk/login/cli/endpoint/media/shortcut。"
-                        )
-                    }
                 ),
                 plugin=self,
             ),
@@ -765,6 +253,7 @@ class TencentChannelCommunityPlugin(Star):
                 description=(
                     "按 CLI 命令名定位 MCP tool 并调用。arguments_json 必须是对应 MCP tool schema 的 "
                     "JSON object 字符串，写操作和高风险操作受插件配置开关限制。"
+                    "鉴权由插件自动处理：8011/130001=接口或工具不存在，151=登录态失效需 /txcm login。"
                 ),
                 parameters=object_parameters(
                     {
@@ -790,18 +279,18 @@ class TencentChannelCommunityPlugin(Star):
                 plugin=self,
             ),
         )
-        self._ensure_default_tool_permissions()
+        await self._ensure_default_tool_permissions()
         logger.info(f"[{PLUGIN_NAME}] Tencent Channel LLM tools registered")
 
-    def _ensure_default_tool_permissions(self) -> None:
-        """把本插件 LLM Tools 的默认权限交给 AstrBot 权限配置。"""
+    async def _ensure_default_tool_permissions(self) -> None:
+        """把本插件 LLM Tools 的默认权限交给 AstrBot 权限配置。
+
+        AstrBot 只在 ``tool_permissions._default`` 里没有该工具时才回退到"非内置工具
+        默认 member（不限制）"，所以这里显式写入 admin，避免本插件的写操作级工具
+        被普通成员直接调用。已存在的配置不会被覆盖。
+        """
         try:
-            perms_store = sp.get(
-                "tool_permissions",
-                {},
-                scope="global",
-                scope_id="global",
-            )
+            perms_store = await sp.global_get("tool_permissions", {})
             if not isinstance(perms_store, dict):
                 perms_store = {}
             defaults = perms_store.get("_default", {})
@@ -815,13 +304,8 @@ class TencentChannelCommunityPlugin(Star):
                     changed = True
             if changed:
                 perms_store["_default"] = defaults
-                sp.put(
-                    "tool_permissions",
-                    perms_store,
-                    scope="global",
-                    scope_id="global",
-                )
-        except Exception as exc:
+                await sp.global_put("tool_permissions", perms_store)
+        except Exception as exc:  # 兜底告警，不阻断插件加载
             logger.warning(
                 f"[{PLUGIN_NAME}] failed to set default tool permissions: {exc}"
             )
@@ -858,294 +342,9 @@ class TencentChannelCommunityPlugin(Star):
         if callable(save_config):
             save_config()
 
-    def _plugin_data_dir(self) -> Path:
-        if get_astrbot_plugin_data_path is not None:
-            root = Path(get_astrbot_plugin_data_path())
-        else:
-            root = Path(__file__).resolve().parent / "data" / "plugin_data"
-        path = root / PLUGIN_NAME
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(trust_env=True)
-        return self._session
-
-    def _timeout(self) -> aiohttp.ClientTimeout:
-        try:
-            seconds = int(self._cfg("request_timeout_seconds", 30))
-        except (TypeError, ValueError):
-            seconds = 30
-        return aiohttp.ClientTimeout(total=max(5, min(seconds, 180)))
-
-    def _token(self) -> str:
-        token = str(self._cfg("qq_ai_connect_token", "") or "").strip()
-        if token.lower().startswith("bearer "):
-            token = token[7:].strip()
-        return token
-
-    async def _post_json(
-        self,
-        url: str,
-        payload: dict[str, Any],
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        session = await self._get_session()
-        proxy = str(self._cfg("proxy", "") or "").strip() or None
-        try:
-            async with session.post(
-                url,
-                json=payload,
-                headers=headers,
-                proxy=proxy,
-                timeout=self._timeout(),
-            ) as response:
-                text = await response.text()
-                if response.status >= 400:
-                    if response.status in {401, 403}:
-                        message = "腾讯频道鉴权失败，请检查 QQ AI Connect Token 或重新 /txcm login。"
-                    elif response.status == 429:
-                        message = "腾讯频道接口触发频率限制，请稍后再试。"
-                    else:
-                        message = f"腾讯频道端点返回 HTTP {response.status}。"
-                    raise TencentChannelError(
-                        f"{message} 响应片段：{text[:300]}",
-                    )
-        except TimeoutError as exc:
-            raise TencentChannelError("请求腾讯频道端点超时。") from exc
-        except aiohttp.ClientError as exc:
-            raise TencentChannelError(f"请求腾讯频道端点失败: {exc}") from exc
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise TencentChannelError("腾讯频道端点返回了非 JSON 响应。") from exc
-        return data
-
-    async def _mcp_request(
-        self,
-        method: str,
-        params: dict[str, Any] | None = None,
-        *,
-        token_required: bool = False,
-    ) -> dict[str, Any]:
-        token = self._token()
-        if token_required and not token:
-            raise TencentChannelError(
-                "未配置 QQ AI Connect Token。请使用 /txcm token 写入。"
-            )
-
-        headers = {"Content-Type": "application/json", "X-Forwarded-Method": "POST"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        payload = {
-            "jsonrpc": "2.0",
-            "id": f"astrbot-{int(time.time() * 1000)}",
-            "method": method,
-        }
-        if params is not None:
-            payload["params"] = params
-
-        data = await self._post_json(str(self._cfg("mcp_endpoint")), payload, headers)
-        if "error" in data:
-            error = data.get("error") or {}
-            message = error.get("message") if isinstance(error, dict) else str(error)
-            if "token" in str(message).lower() or "auth" in str(message).lower():
-                hint = "请检查 Token，或使用 /txcm login 重新授权。"
-            else:
-                hint = "请检查请求参数和 MCP 接口配置。"
-            raise TencentChannelError(f"MCP {method} 失败: {message}。{hint}", data)
-        return data
-
-    async def _initialize_mcp(self) -> dict[str, Any]:
-        if self._server_info:
-            return self._server_info
-
-        response = await self._mcp_request(
-            "initialize",
-            {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": PLUGIN_NAME, "version": PLUGIN_VERSION},
-            },
-        )
-        result = response.get("result")
-        if not isinstance(result, dict):
-            raise TencentChannelError("MCP initialize 返回格式异常。", response)
-        self._server_info = result
-        return result
-
-    async def _list_mcp_tools(self, *, force: bool = False) -> list[dict[str, Any]]:
-        if (
-            self._tool_cache is not None
-            and not force
-            and self._cfg("cache_tool_schema")
-        ):
-            return self._tool_cache
-
-        await self._initialize_mcp()
-        response = await self._mcp_request("tools/list")
-        tools = response.get("result", {}).get("tools", [])
-        if not isinstance(tools, list):
-            raise TencentChannelError("MCP tools/list 返回格式异常。", response)
-        self._tool_cache = [tool for tool in tools if isinstance(tool, dict)]
-        return self._tool_cache
-
-    def _extract_tool_result(self, response: dict[str, Any]) -> dict[str, Any]:
-        result = response.get("result")
-        if not isinstance(result, dict):
-            raise TencentChannelError("MCP tools/call 返回格式异常。", response)
-
-        parsed: dict[str, Any] = {
-            "is_error": bool(result.get("isError")),
-            "code": None,
-            "message": None,
-            "content": [],
-            "raw": result,
-        }
-        for item in result.get("content", []):
-            if not isinstance(item, dict) or item.get("type") != "text":
-                continue
-            text = str(item.get("text") or "")
-            parsed["content"].append(text)
-            lower = text.lower()
-            if lower.startswith("code(") and ":" in text:
-                code_text = text.split(":", 1)[1].strip()
-                parsed["code"] = int(code_text) if code_text.isdigit() else code_text
-            elif lower.startswith("message(") and ":" in text:
-                raw_message = text.split(":", 1)[1].strip()
-                parsed["message"] = _parse_json_text(raw_message, fallback=raw_message)
-
-        if parsed["is_error"]:
-            raise TencentChannelError(self._friendly_mcp_tool_error(parsed), parsed)
-        return parsed
-
-    def _friendly_mcp_tool_error(self, parsed: dict[str, Any]) -> str:
-        """把 MCP tool 错误转换为可操作提示。
-
-        Args:
-            parsed: _extract_tool_result 解析出的错误内容。
-
-        Returns:
-            面向管理员和 LLM 的错误说明。
-        """
-        code = str(parsed.get("code") or "")
-        message = parsed.get("message")
-        if isinstance(message, dict):
-            text = json.dumps(message, ensure_ascii=False)
-        else:
-            text = str(message or "无详细信息")
-
-        if code == "8011" or "未登录" in text or "token" in text.lower():
-            return "腾讯频道鉴权失败，请使用 /txcm login 重新授权，或用 /txcm token 写入有效 Token。"
-        if _is_rate_limit_payload(parsed):
-            return "腾讯频道接口触发频率限制，请等待约 70 秒后重试。"
-        if code == "20047" or "需要加入" in text or "加入后" in text:
-            return "该频道需要先加入才能浏览，请用 search_guild_content 找到并加入频道后重试。"
-        if code == "130000" or "搜索失败" in text:
-            return "搜索失败，该频道可能未加入。search-guild-feeds 只能搜索已加入频道，请先加入后重试。"
-        if code == "20006" or "加入频道后可互动" in text:
-            return "该频道未开放访客互动，需先加入频道才能评论或回复，请用 join_guild 加入后重试。"
-        if code == "100707" or "未回复" in text:
-            return "私信发送受限，对方未回复前只能发送 1 条消息，请等待对方回复后再发。"
-        if "required" in text.lower() or "参数" in text or "validation" in text.lower():
-            return (
-                f"腾讯频道参数校验失败：{text}。请先用 /txcm schema 查看工具 schema。"
-            )
-        return f"腾讯频道 MCP 工具返回错误：{text}"
-
-    async def call_mcp_tool(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any] | None = None,
-        *,
-        bypass_risk_gate: bool = False,
-    ) -> dict[str, Any]:
-        normalized = _normalize_tool_name(tool_name)
-        if not normalized:
-            raise TencentChannelError("工具名不能为空。")
-        if not isinstance(arguments, dict):
-            raise TencentChannelError("arguments 必须是 JSON object。")
-
-        if not bypass_risk_gate:
-            if normalized in HIGH_RISK_TOOLS and not self._cfg(
-                "enable_high_risk_tools"
-            ):
-                raise TencentChannelError(
-                    f"{normalized} 属于高风险操作，请在插件配置中启用高风险工具后再调用。"
-                )
-            if normalized in WRITE_TOOLS and not self._cfg("enable_write_tools"):
-                raise TencentChannelError(
-                    f"{normalized} 属于写操作，请在插件配置中启用写操作工具后再调用。"
-                )
-
-        try:
-            response = await self._mcp_request(
-                "tools/call",
-                {"name": normalized, "arguments": arguments},
-                token_required=True,
-            )
-            return self._extract_tool_result(response)
-        except TencentChannelError as exc:
-            if not self._is_rate_limit_error(exc):
-                raise
-            logger.warning(
-                f"[{PLUGIN_NAME}] {normalized} 触发频率限制，70 秒后自动重试一次"
-            )
-            await asyncio.sleep(70)
-            response = await self._mcp_request(
-                "tools/call",
-                {"name": normalized, "arguments": arguments},
-                token_required=True,
-            )
-            return self._extract_tool_result(response)
-
-    def _is_rate_limit_error(self, exc: TencentChannelError) -> bool:
-        """判断异常是否为限流错误，复用 _is_rate_limit_payload 保持一致。"""
-        return _is_rate_limit_payload(getattr(exc, "data", None)) or _is_rate_limit_payload(str(exc))
     def _extract_guilds(self, data: Any) -> list[dict[str, Any]]:
-        matches: list[dict[str, Any]] = []
-
-        def visit(value: Any) -> None:
-            if isinstance(value, dict):
-                keys = {str(key).lower() for key in value}
-                if {"guildid", "guildname"} & keys or {
-                    "uint64guildid",
-                    "strguildname",
-                } & keys:
-                    matches.append(value)
-                for child in value.values():
-                    visit(child)
-            elif isinstance(value, list):
-                if value and all(isinstance(item, dict) for item in value):
-                    for item in value:
-                        item_keys = {str(key).lower() for key in item}
-                        if {"guildid", "guildname"} & item_keys or {
-                            "uint64guildid",
-                            "strguildname",
-                        } & item_keys:
-                            matches.extend(value)
-                            return
-                for item in value:
-                    visit(item)
-
-        visit(data)
-        unique: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for guild in matches:
-            key = str(
-                guild.get("guildId")
-                or guild.get("guild_id")
-                or guild.get("uint64GuildId")
-                or guild.get("id")
-                or json.dumps(guild, ensure_ascii=False, sort_keys=True)
-            )
-            if key not in seen:
-                unique.append(guild)
-                seen.add(key)
-        return unique
+        """从任意响应里抽出原始频道条目（结构解析见 channel_data.extract_guilds）。"""
+        return cdata.extract_guilds(data)
 
     async def _list_guilds_payload(self) -> dict[str, Any]:
         result = await self.call_mcp_tool(
@@ -1204,35 +403,16 @@ class TencentChannelCommunityPlugin(Star):
             except TencentChannelError as exc:
                 payload["credential_probe"] = f"failed: {exc}"
         payload["skill_update"] = await self._check_skill_update()
+        payload["skill_update"]["localized_version"] = (
+            skill_localize.localized_skill_version(Path(__file__).resolve().parent)
+        )
+        skill_cache = self._skill_cache_dir()
+        if skill_cache is not None:
+            manifest = skill_source.load_manifest(skill_cache)
+            payload["skill_update"]["official_cached_version"] = (
+                manifest.get("version") if manifest else None
+            )
         return payload
-
-    async def _check_skill_update(self) -> dict[str, Any]:
-        """HEAD 请求检测官方 Skill 是否有新版本。"""
-        result: dict[str, Any] = {
-            "latest_version": None,
-            "current_version": SKILL_VERSION,
-            "update_available": False,
-        }
-        session = await self._get_session()
-        proxy = str(self._cfg("proxy", "") or "").strip() or None
-        try:
-            async with session.head(
-                SKILL_UPDATE_CHECK_URL,
-                proxy=proxy,
-                timeout=aiohttp.ClientTimeout(total=10),
-                allow_redirects=True,
-            ) as response:
-                latest = response.headers.get("x-cos-meta-tcc-version")
-                if latest:
-                    result["latest_version"] = latest
-                    result["update_available"] = latest != SKILL_VERSION
-                else:
-                    result["error"] = "响应缺少 x-cos-meta-tcc-version 头"
-                    result["error_hint"] = "官方版本检测失败（响应缺少版本信息），如需详情请查看日志。"
-        except Exception as exc:
-            result["error"] = str(exc)
-            result["error_hint"] = f"官方版本检测失败：{type(exc).__name__}，如需详情请查看日志。"
-        return result
 
     def _resolve_cli_command_key(self, command: str) -> str:
         """把用户输入的 CLI 命令归一化为 domain.action。
@@ -1296,170 +476,404 @@ class TencentChannelCommunityPlugin(Star):
             return {key: ENDPOINT_GUIDE[key]}
         return ENDPOINT_GUIDE
 
-    def _skill_guide_text(self, topic: str = "") -> str:
-        topic = str(topic or "").strip().lower()
-        sections = {
-            "risk": (
-                "风险规则：del_feed、delete_channel、kick_guild_member、leave_guild、"
-                "modify_member_shut_up、do_comment(type=0/2 删除)、do_reply(type=0/2 删除)、"
-                "remove-admin(change_role_member 移除管理员)、deal_notice 等高风险工具默认禁用。"
-                "写操作需要 enable_write_tools，高风险操作还需要 enable_high_risk_tools。"
-                "管理员权限由 AstrBot 的指令和工具权限配置控制。"
-            ),
-            "login": (
-                "登录规则：MCP 调用使用 QQ AI Connect Token，HTTP Header 为 "
-                "Authorization: Bearer <token>。/txcm token 可写入 Token。/txcm login "
-                "会直接请求腾讯连接设备授权端点，发送二维码/授权链接并自动轮询回写 Token。"
-                "鉴权失败（retCode 8011 或'未登录'）时需重新 /txcm login 或 /txcm token。"
-            ),
-            "guild": (
-                "频道管理：先用 txcm_list_guilds 获取当前账号频道；需要具体工具参数时，"
-                "先调用 txcm_get_tool_schema，再用 txcm_call_tool 调用原始 MCP 工具。"
-                "频道号（如 pd20589127）是展示标识，不能当作 guild_id 使用；"
-                "获取 guild_id 可通过 get_share_info 解析分享链接或从 get_my_join_guild_info 提取。"
-            ),
-            "member": (
-                "成员操作：@用户前必须先 guild_member_search 或 get_guild_member_list 查到 tiny_id，"
-                "填入 at_users（id=tiny_id, nick=昵称），严禁用昵称或 QQ 号猜测（QQ 号≤10位，tiny_id>10位）。"
-                "禁言 time_stamp 必须传绝对 Unix 时间戳（当前时间+时长秒数），0=立即解禁。"
-                "禁言、踢人、移除管理员属于高风险操作。"
-                "get-user-info 传参：{} 查自己全局资料，{guild_id} 查自己在频道内资料，"
-                "{guild_id, tiny_id} 查他人在频道内资料。"
-            ),
-            "feed": (
-                "帖子操作：浏览、详情、评论列表通常是读操作；发帖、改帖、删帖、评论、回复、"
-                "置顶、精华、移动帖子属于写操作，其中删帖和评论/回复删除属于高风险操作。"
-                "get-guild-feeds 必须传 get_type（1=热门 2=最新），翻页保持相同 get_type。"
-                "search-guild-feeds 只能搜索已加入频道，未加入返回 retCode=130000。"
-                "do-comment/do-reply 返回 retCode=20006 表示需先加入频道才能互动。"
-            ),
-            "notification": (
-                "通知操作：处理加入申请、私信回复等需要先读取通知列表并保留通知上下文字段。"
-                "deal_notice 属于高风险操作，默认禁用。"
-                "注意：CLI 的 --ref 通知编号机制依赖 CLI 本地通知存储，插件侧无法复刻；"
-                "插件调用 do_comment/do_reply/push_group_normal_dm_msg/deal_notice 时需手动传入 "
-                "feed_id/comment_id/tiny_id 等参数，不支持编号自动填充。"
-            ),
-            "cli": (
-                "CLI 对齐：/txcm cli 可列出 tencent-channel-cli 命令与 MCP tool 映射；"
-                "/txcm map <domain.action> 查看单条映射；/txcm ccall <domain.action> <JSON> "
-                "按 CLI 命令名定位 MCP tool。ccall 的 JSON 参数仍需使用 MCP schema。"
-            ),
-            "endpoint": (
-                "端点规则：登录走 connect.qq.com 设备码接口；业务能力统一走 graph.qq.com MCP "
-                "JSON-RPC tools/call；媒体上传会先 apply_media_upload 再访问动态 sliceupload 地址。"
-            ),
-            "media": (
-                "媒体上传：CLI 会先 apply_media_upload 获取 uploadRsp.upload_addrs，再用内部二进制"
-                "分片协议 POST 到 http://<host>:<port>/sliceupload，最后 apply_media_upload_status_sync。"
-                "当前插件暴露这些 MCP 原子工具，但不复刻 sliceupload 二进制编码。"
-            ),
-            "shortcut": (
-                "快捷命令：quick-publish、search-and-comment、delete-and-mute、search-and-join、"
-                "latest-feeds-detail、hot-feeds-detail 是 CLI 本地多步交互流程（--resume-id 状态机）。"
-                "插件侧不维护 resume 状态，需用原子工具组合执行："
-                "quick-publish → get_my_join_guild_info + get_guild_channel_list + publish_feed；"
-                "search-and-comment → get_search_guild_feed + do_comment；"
-                "delete-and-mute → get_search_guild_feed + del_feed + modify_member_shut_up；"
-                "search-and-join → search_guild_content + join_guild；"
-                "latest/hot-feeds-detail → get_guild_feeds + get_feed_detail。"
-            ),
-            "pagination": (
-                "翻页规则：翻页时严格用上次返回的字段名和值原样传回，不要跨命令复用翻页令牌。"
-                "字段名差异：get-guild-feeds 用 feed_attach_info；"
-                "get-channel-timeline-feeds 用 feed_attch_info（少个 a）；"
-                "get-feed-comments/get-notices/get-next-page-replies 用 attach_info；"
-                "search-guild-feeds 用 cookie（CLI flag 为 --next-page-cookie）。"
-                "get-next-page-replies 首次 attach_info 从 get-feed-comments 的评论对象获取。"
-            ),
-            "markdown": (
-                "Markdown 发帖规则：--content 是纯文本模式，后端不渲染 Markdown；"
-                "内容含 Markdown 语法时必须用 --markdown-content（后端设置 is_markdown=true）。"
-                "两者互斥不可同传。纯文本帖子不接受 --markdown-content，Markdown 帖子不接受 --content。"
-                "alter-feed 编辑 Markdown 帖子时必须用 --markdown-content，否则报错。"
-                "短贴（feed_type=1）的 --markdown-content 中禁止嵌入媒体语法（图片/视频），"
-                "图片/视频必须通过 --image/--video 传入。"
-            ),
-            "inline": (
-                "内联链接与@语法：发帖/评论/回复支持在 content 中内联写入。"
-                "链接语法 [显示文字](https://url)；@语法 @[昵称](tinyid)，tinyid 通常>10位数字。"
-                "Markdown 模式 @语法不同：[@昵称](mqqapi://markdown/mention?at_type=1&at_tinyid=<tinyid>)，"
-                "Markdown 模式下传 --at-user 会被拦截。"
-                "独立参数 --link url|显示文字、--at-user tinyid:昵称 可多次指定，追加在正文末尾。"
-                "禁止在 content 中拼入裸 URL，裸 URL 在帖子里原样显示为纯文本不可点击。"
-            ),
-            "feed_type": (
-                "帖子类型规则：feed_type=1 短贴（≤1000加权字，无标题，支持话题标签）；"
-                "feed_type=2 长贴（>1000加权字，需标题，不支持话题标签）。"
-                "加权字：中文/中文标点=1字，英文/数字/半角=0.5字。"
-                "长贴传入话题参数会被 CLI 直接报错拦截。"
-                "数量限制：短贴≤1000字/≤18图/≤1视频；长贴≤10000字/≤50图/≤5视频；评论回复≤1图。"
-                "alter-feed 不接受 feed_type，帖子类型从原帖自动继承。"
-            ),
-            "alter_feed": (
-                "编辑帖子规则：alter-feed 默认保留原帖所有图片/视频并追加新增内容。"
-                "要替换时必须先清除：--clear-images 清除原图，--clear-videos 清除原视频，可连用 --image/--video。"
-                "alter-feed 不接受 feed_type 参数。已有 CDN URL 时用 images 字段，每项字段名为 url 不是 picUrl。"
-            ),
-            "del_reply": (
-                "删除回复必填字段：do-reply 删除（type=0/2）除 reply_id 外还需："
-                "replier_id、feed_id、feed_author_id、feed_create_time、comment_id、"
-                "comment_author_id、comment_create_time、guild_id、channel_id。"
-                "do-comment 删除（type=0/2）和 do-reply 删除均为高风险，需 --yes。"
-            ),
-            "join_guild": (
-                "加入频道规则：join-guild 内部自动预检加入设置。7种 JoinGuildType："
-                "1=DIRECT 直接加入；2=ADMIN_AUDIT 需向用户收集 join_guild_comment 后再调用；"
-                "4/5=QUESTION 需收集答案填入 join_guild_comment；"
-                "6=MULTI_QUESTION 需 join_guild_answers(JSON数组)；7=QUIZ 需 join_guild_answers(JSON)。"
-                "收到 need_verification 必须先展示问题给用户收集答案后才能再次调用，禁止编造答案。"
-                "update-join-guild-setting：后3种高级类型（QUESTION/MULTI_QUESTION/QUIZ）需 stdin JSON 传 setting 对象。"
-            ),
-            "dm": (
-                "频道私信规则：push-group-dm-msg 两种模式："
-                "模式1（主动发私信）：先 guild_member_search 查 tiny_id，再传 peer_tiny_id + source_guild_id + text。"
-                "source_guild_id 是发送者所在来源频道，不是目标用户所在频道。"
-                "模式2（回复私信通知）：CLI 用 --ref 编号自动填充，插件侧需手动传 peer_tiny_id + source_guild_id。"
-                "限制：对方未回复前只能发1条（retCode=100707）。严禁未获用户同意批量发送。"
-            ),
-            "share_url": (
-                "分享链接规则：帖子列表不自动补取短链，需调 get_feed_share_url。"
-                "get-feed-detail/publish-feed/alter-feed 自动补取帖子短链。"
-                "帖子分享用 get_feed_share_url，频道分享用 get_guild_share_url。"
-                "get_share_info 仅限 pd.qq.com 域名链接解析。"
-                "输出 URL 时用 <链接> 包裹，不用 markdown 语法。"
-            ),
-            "error_codes": (
-                "错误码表：8011=鉴权失败需重新登录；153=频率限制需等待约70秒后重试；"
-                "20047=频道需先加入才能浏览；130000=搜索失败（未加入该频道）；"
-                "20006=需加入频道后才能互动（评论/回复）；100707=私信限制（对方未回复前只能发1条）。"
-                "鉴权失败时引导 /txcm login 或 /txcm token 重新写入凭证。"
-            ),
+    # ------------------------------------------------------------------ #
+    # 语义化只读工具：把 oidb 原语的坑（base64、位掩码、字段名不一致）
+    # 全部收在插件内部，对外只给模型干净的字段。
+    # ------------------------------------------------------------------ #
+    async def _guilds_normalized(
+        self, *, use_cache: bool = True
+    ) -> list[dict[str, Any]]:
+        """归一化后的"我加入的频道"（解码频道名、带 TTL 缓存）。"""
+        if use_cache:
+            cached = self._cache_get("guilds")
+            if cached is not None:
+                return cached
+        payload = await self._list_guilds_payload()
+        guilds = [
+            normalized
+            for normalized in (cdata.normalize_guild(raw) for raw in payload["guilds"])
+            if normalized.get("guild_id")
+        ]
+        if guilds:
+            self._cache_set("guilds", guilds)
+        return guilds
+
+    async def _resolve_guild(self, reference: str) -> dict[str, Any]:
+        """把频道 id / 频道号 / 名称片段解析成归一化频道信息。"""
+        key = str(reference or "").strip()
+        guilds = await self._guilds_normalized()
+        logger.debug(f"[txcm] 解析频道引用：缓存频道数={len(guilds)}")
+        if not guilds:
+            raise TencentChannelError(
+                "上游返回成功但未解析到频道：该账号可能尚未加入任何频道。"
+                "若确认已加入，请 /txcm login 重新授权后重试；"
+                "也可用 txcm_call_tool 调 get_my_join_guild_info 查看原始返回。"
+            )
+        if key:
+            for guild in guilds:
+                if key in (guild.get("guild_id"), guild.get("guild_number")):
+                    return guild
+            matched = [g for g in guilds if key in str(g.get("name") or "")]
+            if len(matched) == 1:
+                return matched[0]
+            if len(matched) > 1:
+                names = "、".join(str(g["name"]) for g in matched[:5])
+                raise TencentChannelError(
+                    f"「{key}」匹配到多个频道：{names}。请改用频道 id 或更完整的名称。"
+                )
+        available = "、".join(
+            str(g.get("name") or g.get("guild_id")) for g in guilds[:10]
+        )
+        raise TencentChannelError(f"没找到频道「{key}」。当前账号已加入：{available}")
+
+    async def _channel_map(self, guild_id: str) -> dict[str, str]:
+        """子频道 id -> 版块名（带 TTL 缓存）。"""
+        cache_key = f"channels:{guild_id}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+        result = await self.call_mcp_tool(
+            "get_guild_channel_list", {"guildIds": [guild_id]}
+        )
+        raw_channels = cdata.extract_channels(self._tool_payload(result))
+        mapping = {
+            channel["channel_id"]: channel["name"]
+            for channel in (cdata.normalize_channel(raw) for raw in raw_channels)
+            if channel.get("channel_id")
         }
-        if topic in sections:
-            return sections[topic]
-        return "\n".join(
-            [
-                sections["login"],
-                sections["risk"],
-                sections["error_codes"],
-                sections["cli"],
-                sections["endpoint"],
-                sections["guild"],
-                sections["member"],
-                sections["feed"],
-                sections["feed_type"],
-                sections["markdown"],
-                sections["inline"],
-                sections["pagination"],
-                sections["alter_feed"],
-                sections["del_reply"],
-                sections["join_guild"],
-                sections["dm"],
-                sections["share_url"],
-                sections["notification"],
-                sections["shortcut"],
+        if mapping:
+            self._cache_set(cache_key, mapping)
+        return mapping
+
+    async def _safe_channel_map(self, guild_id: str) -> dict[str, str]:
+        """取版块名映射；失败时退化为空映射，不阻断主流程。
+
+        降级会打 warning 日志：否则模型和用户都分不清"没有版块名"还是"版块接口坏了"。
+        """
+        try:
+            return await self._channel_map(guild_id)
+        except TencentChannelError as exc:
+            logger.warning(
+                f"[{PLUGIN_NAME}] 获取版块列表失败，本次结果不带版块名：{exc}"
+            )
+            return {}
+
+    def _feed_view(
+        self, raw: dict[str, Any], channels: dict[str, str]
+    ) -> dict[str, Any]:
+        """把原始帖子转成给模型看的精简结构（字段归一 + 时间可读）。"""
+        feed = cdata.normalize_feed(raw)
+        channel_id = feed["channel_id"]
+        return {
+            "feed_id": feed["feed_id"],
+            "guild_id": feed.get("guild_id", ""),
+            "channel_id": channel_id,
+            # 版块名取不到时退回 channel_id，至少让模型知道帖子属于哪个版块
+            "channel": channels.get(channel_id) or (channel_id if channel_id else ""),
+            "title": feed["title"],
+            "content": feed["content"][:280],
+            "author": feed["author"],
+            "time": _format_timestamp(feed["create_time"]),
+            "create_time": feed["create_time"],
+            "comment_count": feed["comment_count"],
+            "image_count": feed["image_count"],
+        }
+
+    def _comment_view(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """把原始评论转成精简结构（正文 / IP 属地 / 实体分开给出）。
+
+        正文里的实体是带标注的内联形式（``[表情:汪汪]`` / ``[卡片:标题]`` / ``[@昵称]``），
+        原始 id / url 放在结构化字段里；空列表不放进结果，避免每次调用都带三个空数组。
+        """
+        comment = cdata.normalize_comment(raw)
+        view: dict[str, Any] = {
+            "author": comment["author"],
+            "time": _format_timestamp(comment["create_time"]),
+            "content": comment["content"],
+            "location": comment["location"],
+        }
+        for key in ("faces", "cards", "mentions"):
+            if comment.get(key):
+                view[key] = comment[key]
+        return view
+
+    async def _search_feeds(self, guild_id: str, query: str) -> dict[str, Any]:
+        """调用搜索接口并返回业务数据（searchType.type 必须为 0）。"""
+        result = await self.call_mcp_tool(
+            "get_search_guild_feed",
+            {
+                "guildId": guild_id,
+                "query": query,
+                "searchType": {"type": 0, "feedType": 1},
+                "cookie": "",
+            },
+        )
+        return self._tool_payload(result) or {}
+
+    @staticmethod
+    def _search_total(payload: Any) -> int | None:
+        """搜索命中总数（实测在 unionResult.feedTotal，且是字符串）。"""
+        if not isinstance(payload, dict):
+            return None
+        for node in (payload, payload.get("unionResult")):
+            if isinstance(node, dict):
+                total = node.get("feedTotal")
+                if total not in (None, ""):
+                    return cdata.as_int(total)
+        return None
+
+    @staticmethod
+    def _search_guild_url(payload: Any) -> str:
+        """频道分享链接（实测在 aiSearchInfo.guildUrl）。"""
+        if not isinstance(payload, dict):
+            return ""
+        info = payload.get("aiSearchInfo")
+        if isinstance(info, dict):
+            return str(info.get("guildUrl") or "")
+        return ""
+
+    async def _fetch_guild_feeds(
+        self, guild_id: str, get_type: int, count: int
+    ) -> dict[str, Any]:
+        """调用帖子流接口并返回业务数据。"""
+        result = await self.call_mcp_tool(
+            "get_guild_feeds",
+            {"guildId": guild_id, "getType": get_type, "count": count},
+        )
+        return self._tool_payload(result) or {}
+
+    async def _feed_comments(
+        self, feed_id: str, *, guild_id: str = "", channel_id: str = ""
+    ) -> list[dict[str, Any]]:
+        """取某帖评论。
+
+        实测约束（2026-09 验证）：
+        - ``channelSign`` 必须带且为驼峰 ``guildId``/``channelId``，缺了会报"请求失败"；
+        - ``pageSize`` 默认 20；上限以 schema 为准（历史实测 30/50 曾被拒）。
+        - 评论数组字段名是 ``vecComment``，正文是 base64 protobuf（由 channel_data 解码）。
+        """
+        arguments: dict[str, Any] = {"feedId": feed_id, "pageSize": 20}
+        if guild_id and channel_id:
+            arguments["channelSign"] = {"guildId": guild_id, "channelId": channel_id}
+        result = await self.call_mcp_tool("get_feed_comments", arguments)
+        raw_comments = cdata.extract_comments(self._tool_payload(result))
+        return [self._comment_view(raw) for raw in raw_comments]
+
+    async def tool_guild_channels(self, guild: str) -> str:
+        target = await self._resolve_guild(guild)
+        mapping = await self._channel_map(target["guild_id"])
+        return _json_dumps(
+            {
+                "ok": True,
+                "guild": target,
+                "channel_count": len(mapping),
+                "channels": [
+                    {"channel_id": channel_id, "name": name}
+                    for channel_id, name in mapping.items()
+                ],
+            },
+            12000,
+        )
+
+    async def tool_search_feeds(self, guild: str, keyword: str, limit: int = 10) -> str:
+        target = await self._resolve_guild(guild)
+        query = str(keyword or "").strip()
+        if not query:
+            raise TencentChannelError("keyword 不能为空。")
+        count = max(1, min(cdata.as_int(limit, 10) or 10, 30))
+        payload = await self._search_feeds(target["guild_id"], query)
+        channels = await self._safe_channel_map(target["guild_id"])
+        feeds = [self._feed_view(raw, channels) for raw in cdata.extract_feeds(payload)]
+        ranked = [
+            row["item"]
+            for row in cdata.rank_by_relevance(
+                feeds, query, text_keys=("title", "content")
+            )
+        ]
+        return _json_dumps(
+            {
+                "ok": True,
+                "guild": target,
+                "guild_url": self._search_guild_url(payload),
+                "query": query,
+                "total_matched": self._search_total(payload),
+                "returned": len(ranked[:count]),
+                "feeds": ranked[:count],
+            },
+            12000,
+        )
+
+    async def tool_latest_feeds(
+        self, guild: str, count: int = 10, order: str = "hot"
+    ) -> str:
+        target = await self._resolve_guild(guild)
+        size = max(1, min(cdata.as_int(count, 10) or 10, 30))
+        wanted = str(order or "hot").strip().lower()
+        get_type = 2 if wanted in ("new", "latest", "最新") else 1
+        channels = await self._safe_channel_map(target["guild_id"])
+        payload = await self._fetch_guild_feeds(target["guild_id"], get_type, size)
+        feeds = [self._feed_view(raw, channels) for raw in cdata.extract_feeds(payload)]
+        note = ""
+        if not feeds and get_type == 2:
+            # 实测 getType=2（最新）经常返回空列表，退回热门流并说明，避免模型拿到空结果
+            payload = await self._fetch_guild_feeds(target["guild_id"], 1, size)
+            feeds = [
+                self._feed_view(raw, channels) for raw in cdata.extract_feeds(payload)
             ]
+            note = "最新流返回为空，已退回热门流（网关 getType=2 实测常空）。"
+        return _json_dumps(
+            {
+                "ok": True,
+                "guild": target,
+                "order": "new" if get_type == 2 else "hot",
+                "returned": len(feeds),
+                "feeds": feeds,
+                "note": note,
+            },
+            12000,
+        )
+
+    async def tool_read_feed(
+        self,
+        feed_id: str,
+        guild: str = "",
+        channel_id: str = "",
+        with_comments: bool = True,
+    ) -> str:
+        fid = str(feed_id or "").strip()
+        if not fid:
+            raise TencentChannelError("feed_id 不能为空。")
+
+        payload: dict[str, Any] = {
+            "ok": True,
+            "feed_id": fid,
+            "feed": None,
+            "comments": [],
+            "note": "",
+        }
+        detail = await self.call_mcp_tool("get_feed_detail", {"feedId": fid})
+        detail_payload = self._tool_payload(detail)
+        raw_feeds = cdata.extract_feeds(detail_payload) if detail_payload else []
+        if raw_feeds:
+            payload["feed"] = self._feed_view(raw_feeds[0], {})
+        elif detail_payload:
+            payload["feed"] = {"raw": detail_payload}
+
+        if with_comments:
+            guild_id = str(guild or "").strip()
+            if guild_id and not guild_id.isdigit():
+                try:
+                    guild_id = (await self._resolve_guild(guild_id))["guild_id"]
+                except TencentChannelError as exc:
+                    payload["note"] = f"频道解析失败：{exc}；"
+                    guild_id = ""
+            channel_id = str(channel_id or "").strip()
+            if not guild_id:
+                guild_id = str((payload["feed"] or {}).get("guild_id") or "")
+            if not channel_id:
+                channel_id = str((payload["feed"] or {}).get("channel_id") or "")
+            try:
+                payload["comments"] = await self._feed_comments(
+                    fid, guild_id=guild_id, channel_id=channel_id
+                )
+            except TencentChannelError as exc:
+                payload["note"] += (
+                    f"评论获取失败：{exc}。可先用 txcm_search_feeds 或 txcm_latest_feeds "
+                    "拿到 channel_id 后重试（评论接口需要 channelSign）。"
+                )
+        return _json_dumps(payload, 16000)
+
+    async def tool_do_comment(
+        self,
+        feed_id: str,
+        content: str,
+        poster_tinyid: str = "",
+        comment_type: int = 1,
+    ) -> str:
+        """发表评论：自动取原帖 StFeed 透传，content 自动 base64。"""
+        fid = str(feed_id or "").strip()
+        text = str(content or "").strip()
+        if not fid:
+            raise TencentChannelError("feed_id 不能为空。")
+        if not text:
+            raise TencentChannelError("content 不能为空。")
+
+        detail = await self.call_mcp_tool("get_feed_detail", {"feedId": fid})
+        raw_feeds = cdata.extract_feeds(self._tool_payload(detail))
+        if not raw_feeds:
+            raise TencentChannelError("未取到原帖数据，无法安全发表评论；请稍后重试。")
+
+        comment: dict[str, Any] = {
+            "content": base64.b64encode(text.encode("utf-8")).decode("ascii")
+        }
+        tinyid = str(poster_tinyid or "").strip()
+        if tinyid:
+            comment["postUser"] = {"id": tinyid}
+
+        result = await self.call_mcp_tool(
+            "do_comment",
+            {
+                "commentType": int(comment_type),
+                "feed": raw_feeds[0],
+                "comment": comment,
+            },
+        )
+        return _json_dumps(result, 8000)
+
+    async def tool_ask_channel(self, guild: str, question: str, limit: int = 5) -> str:
+        """组合动作：搜帖子 → 读评论 → 按相关度排序，带出处返回回答素材。"""
+        target = await self._resolve_guild(guild)
+        text = str(question or "").strip()
+        if not text:
+            raise TencentChannelError("question 不能为空。")
+        size = max(1, min(cdata.as_int(limit, 5) or 5, 8))
+
+        payload = await self._search_feeds(target["guild_id"], text)
+        channels = await self._safe_channel_map(target["guild_id"])
+        posts = [self._feed_view(raw, channels) for raw in cdata.extract_feeds(payload)]
+        ranked = [
+            row["item"]
+            for row in cdata.rank_by_relevance(
+                posts, text, text_keys=("title", "content")
+            )
+        ][:size]
+
+        snippets: list[dict[str, Any]] = []
+        for post in ranked:
+            entry = dict(post)
+            entry["comments"] = []
+            try:
+                comments = await self._feed_comments(
+                    post["feed_id"],
+                    guild_id=target["guild_id"],
+                    channel_id=post["channel_id"],
+                )
+            except TencentChannelError as exc:
+                entry["comments_error"] = str(exc)
+            else:
+                entry["comments"] = [
+                    row["item"]
+                    for row in cdata.rank_by_relevance(
+                        comments, text, text_keys=("content",)
+                    )[:5]
+                ]
+            snippets.append(entry)
+
+        return _json_dumps(
+            {
+                "ok": True,
+                "guild": target,
+                "guild_url": self._search_guild_url(payload),
+                "question": text,
+                "total_matched": self._search_total(payload),
+                "scanned_posts": len(snippets),
+                "snippets": snippets,
+                "note": (
+                    "答案通常出现在 comments 里；正文/评论由上游返回，可能被截断，"
+                    "结论请以 latest 为准并注明出处（作者+时间）。"
+                ),
+            },
+            16000,
         )
 
     async def tool_status(self) -> str:
@@ -1471,23 +885,46 @@ class TencentChannelCommunityPlugin(Star):
         rows = []
         for tool in tools:
             name = str(tool.get("name") or "")
+            if name in UNAVAILABLE_TOOLS:
+                continue
             desc = str(tool.get("description") or "")
             if keyword and keyword not in name.lower() and keyword not in desc.lower():
                 continue
             rows.append({"name": name, "description": desc})
-        return _json_dumps(rows)
+        return _json_dumps(
+            {
+                "tools": rows,
+                "unavailable": sorted(UNAVAILABLE_TOOLS),
+                "note": "unavailable 中的工具在网关上不可用（调用 130001），已被插件禁用。",
+            }
+        )
 
     async def tool_get_tool_schema(self, tool_name: str) -> str:
-        normalized = _normalize_tool_name(tool_name)
+        normalized = mcp_protocol.normalize_tool_name(tool_name)
         tools = await self._list_mcp_tools()
         for tool in tools:
-            if _normalize_tool_name(str(tool.get("name") or "")) == normalized:
+            if (
+                mcp_protocol.normalize_tool_name(str(tool.get("name") or ""))
+                == normalized
+            ):
                 return _json_dumps(tool)
         raise TencentChannelError(f"未找到 MCP 工具: {tool_name}")
 
     async def tool_list_guilds(self) -> str:
+        """列出已加入的频道（频道名/频道号自动 base64 解码）。"""
+        guilds = await self._guilds_normalized()
+        if guilds:
+            return _json_dumps({"ok": True, "count": len(guilds), "guilds": guilds})
         payload = await self._list_guilds_payload()
-        return _json_dumps(payload)
+        return _json_dumps(
+            {
+                "ok": False,
+                "count": 0,
+                "guilds": [],
+                "raw_guild_count": len(payload["guilds"]),
+                "note": "列表为空：该账号可能尚未加入任何频道；若确认已加入，请 /txcm login 重新授权后重试，或用 txcm_call_tool 调 get_my_join_guild_info 查看原始返回。",
+            }
+        )
 
     async def tool_call_tool(
         self,
@@ -1496,7 +933,9 @@ class TencentChannelCommunityPlugin(Star):
         arguments_json: str = "",
     ) -> str:
         if arguments is None:
-            arguments = _parse_json_text(str(arguments_json or "{}"), fallback=None)
+            arguments = mcp_protocol.parse_json_text(
+                str(arguments_json or "{}"), fallback=None
+            )
         if not isinstance(arguments, dict):
             raise TencentChannelError(
                 'arguments_json 必须是 JSON object 字符串，例如 {"guildId":"123"}。'
@@ -1504,8 +943,92 @@ class TencentChannelCommunityPlugin(Star):
         result = await self.call_mcp_tool(tool_name, arguments)
         return _json_dumps(result)
 
-    async def tool_skill_guide(self, topic: str = "") -> str:
-        return self._skill_guide_text(topic)
+    def _skill_cache_dir(self) -> Path | None:
+        """官方 Skill 缓存目录；定位失败时返回 None，仅保留内置踩坑附录。"""
+        try:
+            from astrbot.api.star import StarTools
+
+            return Path(StarTools.get_data_dir(PLUGIN_NAME)) / "skill"
+        except Exception:
+            pass
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+            return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "skill"
+        except Exception:
+            return None
+
+    async def _ensure_skill_source(self, *, force: bool = False) -> dict[str, Any]:
+        cache_dir = self._skill_cache_dir()
+        if cache_dir is None:
+            return {"error": "无法定位插件数据目录，官方 Skill 缓存不可用"}
+        session = await self._get_session()
+        proxy = str(self._cfg("proxy", "") or "").strip() or None
+        refresh = await skill_source.refresh_skill_cache(
+            cache_dir, session, proxy, force=force
+        )
+        logger.debug(f"[txcm] 官方 Skill 缓存刷新结果：{refresh}")
+
+    async def _localize_official_skill(self, *, force: bool = False) -> dict[str, Any]:
+        """下载官方 Skill 并调用模型本地化；任何失败保留现有技能。"""
+        refresh = await self._ensure_skill_source(force=force)
+        if refresh.get("error"):
+            return {**refresh, "stage": "download"}
+        official_version = str(
+            refresh.get("latest_version") or refresh.get("cached_version") or ""
+        )
+        if not official_version:
+            return {"error": "无法确定官方 Skill 版本", "stage": "download"}
+        plugin_dir = Path(__file__).resolve().parent
+        current = skill_localize.localized_skill_version(plugin_dir)
+        if not force and current == official_version:
+            return {
+                "skipped": "本地化技能已是该版本",
+                "localized_version": current,
+                "official_version": official_version,
+            }
+        cache_dir = self._skill_cache_dir()
+        files = skill_source.official_files(cache_dir) if cache_dir else {}
+        if not files.get("SKILL.md"):
+            return {"error": "官方缓存缺少 SKILL.md", "stage": "download"}
+        provider_id = str(self._cfg("skill_localize_provider", "") or "").strip()
+        if provider_id:
+            provider = self.context.get_provider_by_id(provider_id)
+        else:
+            provider = await self.context.get_using_provider_async()
+        if provider is None:
+            return {
+                "error": "未配置可用的 LLM 供应商",
+                "stage": "localize",
+                "official_version": official_version,
+            }
+        mapping_rows = [
+            f"{command} -> {item.get('tool')}"
+            for command, item in CLI_COMMANDS.items()
+            if item.get("tool")
+        ]
+        prompt = skill_localize.build_localize_prompt(
+            files, official_version, mapping_rows
+        )
+        logger.debug(
+            f"[txcm] Skill 本地化：provider={'自定义' if provider_id else '主 LLM'} "
+            f"official=v{official_version} prompt_chars={len(prompt)} "
+            f"official_files={sorted(files)}"
+        )
+        response = await provider.text_chat(
+            prompt=prompt,
+            system_prompt=skill_localize.SYSTEM_PROMPT,
+        )
+        payload = skill_localize.parse_localized_payload(
+            str(response.completion_text or "")
+        )
+        skill_localize.write_localized_skill(plugin_dir, payload)
+        logger.debug(f"[txcm] Skill 本地化写盘完成：{sorted(payload)}")
+        return {
+            "localized_version": official_version,
+            "official_version": official_version,
+            "files": sorted(payload),
+        }
 
     async def tool_list_cli_commands(self, query: str = "") -> str:
         keyword = str(query or "").strip().lower()
@@ -1550,7 +1073,9 @@ class TencentChannelCommunityPlugin(Star):
         if not tool_name:
             raise TencentChannelError(str(mapping["call_note"]))
         if arguments is None:
-            arguments = _parse_json_text(str(arguments_json or "{}"), fallback=None)
+            arguments = mcp_protocol.parse_json_text(
+                str(arguments_json or "{}"), fallback=None
+            )
         if not isinstance(arguments, dict):
             raise TencentChannelError(
                 'arguments_json 必须是 JSON object 字符串，例如 {"guildId":"123"}。'
@@ -1560,177 +1085,6 @@ class TencentChannelCommunityPlugin(Star):
 
     async def tool_endpoint_guide(self, topic: str = "") -> str:
         return _json_dumps(self._endpoint_payload(topic))
-
-    async def _request_device_code(self) -> dict[str, Any]:
-        url = str(self._cfg("device_code_request_url", "") or "").strip()
-        if not url:
-            raise TencentChannelError(
-                "未配置设备码申请端点，请在插件配置中填写或使用 /txcm token 写入 Token。"
-            )
-
-        payload = _parse_json_text(
-            str(self._cfg("login_request_payload_json", "{}") or "{}"),
-            fallback={},
-        )
-        if not isinstance(payload, dict):
-            raise TencentChannelError("login_request_payload_json 必须是 JSON object。")
-        device_id = str(payload.get("device_id") or "").strip()
-        if device_id:
-            try:
-                uuid.UUID(device_id)
-            except ValueError as exc:
-                raise TencentChannelError("device_id 必须是合法 UUID。") from exc
-        else:
-            device_id = str(uuid.uuid4())
-            payload["device_id"] = device_id
-
-        data = await self._post_json(
-            url,
-            payload,
-            {
-                "Content-Type": "application/json",
-                "X-Oidb": json.dumps(REQUEST_DEVICE_CODE_OIDB, separators=(",", ":")),
-            },
-        )
-        result = self._unwrap_auth_gateway_response(data)
-        if isinstance(result, dict):
-            result.setdefault("device_id", device_id)
-        return result
-
-    async def _poll_device_token(
-        self, device_code: str, device_id: str
-    ) -> dict[str, Any]:
-        url = str(self._cfg("device_token_poll_url", "") or "").strip()
-        if not url:
-            raise TencentChannelError("未配置设备码轮询端点。")
-        payload = _parse_json_text(
-            str(self._cfg("login_poll_payload_json", "{}") or "{}"),
-            fallback={},
-        )
-        if not isinstance(payload, dict):
-            raise TencentChannelError("login_poll_payload_json 必须是 JSON object。")
-        payload["device_code"] = device_code
-        payload["device_id"] = device_id
-        data = await self._post_json(
-            url,
-            payload,
-            {
-                "Content-Type": "application/json",
-                "X-Oidb": json.dumps(POLL_DEVICE_TOKEN_OIDB, separators=(",", ":")),
-            },
-        )
-        return self._unwrap_auth_gateway_response(data)
-
-    def _unwrap_auth_gateway_response(self, data: Any) -> dict[str, Any]:
-        """解包腾讯连接设备授权网关响应。
-
-        Args:
-            data: 上游返回的 JSON 对象。
-
-        Returns:
-            解包后的业务数据。
-
-        Raises:
-            TencentChannelError: 上游返回业务错误或结构异常。
-        """
-        if not isinstance(data, dict):
-            raise TencentChannelError("腾讯频道登录端点返回格式异常。", data)
-
-        retcode = data.get("retcode")
-        if retcode not in (None, 0, "0"):
-            message = data.get("message") or data.get("msg") or data.get("tipMsg")
-            error = data.get("error")
-            if not message and isinstance(error, dict):
-                message = error.get("message")
-            raise TencentChannelError(
-                f"腾讯频道登录网关错误：retcode={retcode}，{message or '无详细信息'}",
-                data,
-            )
-
-        payload = data.get("data", data)
-        if isinstance(payload, str):
-            payload = _parse_json_text(payload, fallback={"value": payload})
-        if not isinstance(payload, dict):
-            raise TencentChannelError("腾讯频道登录端点 data 格式异常。", data)
-
-        code = payload.get("code")
-        if code not in (None, 0, "0"):
-            message = payload.get("message") or payload.get("msg") or "无详细信息"
-            raise TencentChannelError(
-                f"腾讯频道登录业务错误：code={code}，{message}",
-                data,
-            )
-
-        inner = payload.get("data", payload)
-        if isinstance(inner, str):
-            inner = _parse_json_text(inner, fallback={"value": inner})
-        if not isinstance(inner, dict):
-            raise TencentChannelError("腾讯频道登录业务 data 格式异常。", data)
-        return inner
-
-    def _extract_login_token(self, data: dict[str, Any]) -> str:
-        for key in (
-            "qq_ai_connect_token",
-            "QQ_AI_CONNECT_TOKEN",
-            "access_token",
-            "token",
-            "session_key",
-            "sessionKey",
-        ):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        credentials = data.get("credentials")
-        if isinstance(credentials, dict):
-            return self._extract_login_token(credentials)
-        return ""
-
-    async def _login_poll_loop(
-        self,
-        event: AstrMessageEvent,
-        device_code: str,
-        device_id: str,
-        interval: int,
-        expires_in: int,
-    ) -> None:
-        deadline = time.time() + max(60, expires_in)
-        while time.time() < deadline:
-            await asyncio.sleep(max(1, interval))
-            try:
-                data = await self._poll_device_token(device_code, device_id)
-            except TencentChannelError as exc:
-                await event.send(event.plain_result(f"腾讯频道登录轮询失败：{exc}"))
-                return
-
-            status = str(data.get("status") or "").lower()
-            next_interval = data.get("interval")
-            if next_interval:
-                try:
-                    interval = int(next_interval)
-                except (TypeError, ValueError):
-                    pass
-            token = self._extract_login_token(data)
-            if token:
-                self._set_cfg("qq_ai_connect_token", token)
-                self._save_config()
-                await event.send(
-                    event.plain_result("腾讯频道登录成功，Token 已写入插件配置。")
-                )
-                return
-            if status in {"authorized", "success"}:
-                await event.send(
-                    event.plain_result("腾讯频道已授权，但轮询响应中没有 Token。")
-                )
-                return
-            if status in {"1", "pending", "pending_authorization"}:
-                continue
-            if status in {"expired", "denied", "cancelled", "failed"}:
-                await event.send(event.plain_result(f"腾讯频道登录失败：{status}"))
-                return
-
-        await event.send(
-            event.plain_result("腾讯频道登录二维码已过期，请重新执行 /txcm login。")
-        )
 
     def _help_text(self) -> str:
         return (
@@ -1746,13 +1100,12 @@ class TencentChannelCommunityPlugin(Star):
             "/txcm list - 列出已加入频道\n"
             "/txcm call <工具名> <JSON> - 调用原始 MCP 工具\n"
             "/txcm ccall <domain.action> <JSON> - 按 CLI 命令名调用 MCP 工具\n"
-            "/txcm guide [topic] - 查看内置 Skill 指导"
+            "/txcm guide [topic] - 查看官方 Skill 与踩坑附录"
         )
 
     @filter.command_group("txcm")
     def txcm(self):
         """腾讯频道社区管理工具指令组。"""
-        pass
 
     @txcm.custom_filter(filter.PermissionTypeFilter, filter.PermissionType.ADMIN)
     @txcm.command("help")
@@ -1866,7 +1219,7 @@ class TencentChannelCommunityPlugin(Star):
             try:
                 base64.b64decode(qr_code, validate=False)
                 yield event.chain_result([Comp.Image.fromBase64(qr_code)])
-            except Exception:
+            except Exception:  # 兜底降级为文本提示，不中断登录输出
                 logger.warning(f"[{PLUGIN_NAME}] login qr_code is not valid base64")
         yield event.plain_result("\n".join(lines))
 
@@ -1933,7 +1286,7 @@ class TencentChannelCommunityPlugin(Star):
                 lines.append(f"  {item['note']}")
             if len(lines) >= 90:
                 lines.append("... 已截断，请加关键词过滤")
-            break
+                break
         yield event.plain_result("\n".join(lines) if lines else "未找到匹配命令。")
 
     @txcm.custom_filter(filter.PermissionTypeFilter, filter.PermissionType.ADMIN)
@@ -2006,7 +1359,7 @@ class TencentChannelCommunityPlugin(Star):
         raw_json: GreedyStr = "",
     ) -> AsyncGenerator[MessageEventResult, None]:
         """调用腾讯频道 MCP 原始工具。"""
-        arguments = _parse_json_text(str(raw_json or "{}"), fallback=None)
+        arguments = mcp_protocol.parse_json_text(str(raw_json or "{}"), fallback=None)
         if not isinstance(arguments, dict):
             yield event.plain_result(
                 '参数必须是 JSON object，例如：/txcm call get_guild_info {"guildId":"..."}'
@@ -2029,7 +1382,7 @@ class TencentChannelCommunityPlugin(Star):
         raw_json: GreedyStr = "",
     ) -> AsyncGenerator[MessageEventResult, None]:
         """按 CLI 命令名定位 MCP 工具并调用。"""
-        arguments = _parse_json_text(str(raw_json or "{}"), fallback=None)
+        arguments = mcp_protocol.parse_json_text(str(raw_json or "{}"), fallback=None)
         if not isinstance(arguments, dict):
             yield event.plain_result(
                 '参数必须是 JSON object，例如：/txcm ccall feed.get-feed-detail {"feedId":"..."}'
@@ -2050,5 +1403,29 @@ class TencentChannelCommunityPlugin(Star):
         event: AstrMessageEvent,
         topic: GreedyStr = "",
     ) -> AsyncGenerator[MessageEventResult, None]:
-        """查看内置 Skill 指导。"""
-        yield event.plain_result(self._skill_guide_text(str(topic or "")))
+        """查看踩坑附录使用规则。"""
+        yield event.plain_result(skill_guide_text(str(topic or "")))
+
+    @txcm.command("skill_update")
+    async def txcm_skill_update(
+        self,
+        event: AstrMessageEvent,
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """拉取官方 Skill 并调用模型本地化为插件内置技能。"""
+        result = await self._localize_official_skill(force=True)
+        if result.get("error"):
+            yield event.plain_result(
+                f"Skill 本地化失败（{result.get('stage') or 'unknown'}）：{result['error']}"
+                "；现有技能保持不变。"
+            )
+            return
+        if result.get("skipped"):
+            yield event.plain_result(
+                f"官方 Skill {result.get('official_version')} 未变化，本地化技能仍为"
+                f" {result.get('localized_version')}。"
+            )
+            return
+        yield event.plain_result(
+            f"Skill 本地化完成：v{result.get('localized_version')}"
+            f"（{', '.join(result.get('files', []))}）"
+        )

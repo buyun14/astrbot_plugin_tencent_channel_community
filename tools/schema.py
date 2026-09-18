@@ -21,6 +21,14 @@ def string_param(description: str) -> dict[str, Any]:
     return {"type": "string", "description": description}
 
 
+def integer_param(description: str) -> dict[str, Any]:
+    return {"type": "integer", "description": description}
+
+
+def boolean_param(description: str) -> dict[str, Any]:
+    return {"type": "boolean", "description": description}
+
+
 def object_parameters(
     properties: dict[str, dict[str, Any]],
     *,

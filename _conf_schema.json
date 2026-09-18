@@ -90,9 +90,10 @@
       },
       "skill_localize_provider": {
         "type": "string",
-        "description": "Skill 本地化模型供应商 ID",
+        "description": "Skill 本地化模型供应商",
         "hint": "/txcm skill_update 时调用该供应商把官方 Skill 改写为插件本地版；留空使用主 LLM",
-        "default": ""
+        "default": "",
+        "_special": "select_provider"
       }
     }
   },

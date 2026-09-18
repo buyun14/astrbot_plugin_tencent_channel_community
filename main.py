@@ -21,6 +21,7 @@ from .app.core.constants import (
     DEFAULT_GUILD_LIST_ARGUMENTS,
     PLUGIN_NAME,
     TXCM_LLM_TOOL_NAMES,
+    UNAVAILABLE_TOOLS,
 )
 from .app.core.errors import TencentChannelError
 from .app.models.cli_reference import CLI_COMMANDS, ENDPOINT_GUIDE
@@ -484,9 +485,9 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         guilds = await self._guilds_normalized()
         if not guilds:
             raise TencentChannelError(
-                "没取到频道列表。可能是 Token 失效（/txcm login 重新授权），"
-                "也可能是上游返回结构变化导致解析不出频道"
-                "（可用 txcm_call_tool 直接调用 get_my_join_guild_info 查看原始字段）。"
+                "上游返回成功但未解析到频道：该账号可能尚未加入任何频道。"
+                "若确认已加入，请 /txcm login 重新授权后重试；"
+                "也可用 txcm_call_tool 调 get_my_join_guild_info 查看原始返回。"
             )
         if key:
             for guild in guilds:
@@ -821,11 +822,19 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         rows = []
         for tool in tools:
             name = str(tool.get("name") or "")
+            if name in UNAVAILABLE_TOOLS:
+                continue
             desc = str(tool.get("description") or "")
             if keyword and keyword not in name.lower() and keyword not in desc.lower():
                 continue
             rows.append({"name": name, "description": desc})
-        return _json_dumps(rows)
+        return _json_dumps(
+            {
+                "tools": rows,
+                "unavailable": sorted(UNAVAILABLE_TOOLS),
+                "note": "unavailable 中的工具在网关上不可用（调用 130001），已被插件禁用。",
+            }
+        )
 
     async def tool_get_tool_schema(self, tool_name: str) -> str:
         normalized = mcp_protocol.normalize_tool_name(tool_name)

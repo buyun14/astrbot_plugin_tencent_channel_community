@@ -87,14 +87,14 @@ CLI_COMMANDS: dict[str, dict[str, Any]] = {
     },
     "feed.do-comment": {
         "tool": "do_comment",
+        "risk": "high-risk-write",
         "group": "write",
-        "risk": "write",
         "description": "发表或删除评论",
     },
     "feed.do-reply": {
         "tool": "do_reply",
+        "risk": "high-risk-write",
         "group": "write",
-        "risk": "write",
         "description": "发表或删除回复",
     },
     "feed.do-like": {
@@ -182,6 +182,7 @@ CLI_COMMANDS: dict[str, dict[str, Any]] = {
     },
     "manage.get-my-join-guild-info": {
         "tool": "get_my_join_guild_info",
+        "note": "bytesCookie 首次传空串即可（schema 标 required 但空串可用），分页回传网关返回的 cookie。",
         "group": "query",
         "risk": "read",
         "description": "查看我的腾讯频道列表",
@@ -242,8 +243,8 @@ CLI_COMMANDS: dict[str, dict[str, Any]] = {
     },
     "manage.modify-member-shut-up": {
         "tool": "modify_member_shut_up",
+        "risk": "high-risk-write",
         "group": "write",
-        "risk": "write",
         "description": "禁言或解禁成员",
     },
     "manage.update-guild-info": {

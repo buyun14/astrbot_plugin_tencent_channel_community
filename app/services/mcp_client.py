@@ -29,6 +29,7 @@ from ..core.constants import (
     PLUGIN_VERSION,
     SKILL_UPDATE_CHECK_URL,
     SKILL_VERSION,
+    UNAVAILABLE_TOOLS,
     WRITE_TOOLS,
 )
 from ..core.errors import TencentChannelError
@@ -502,6 +503,10 @@ class McpClientMixin:
             raise TencentChannelError("工具名不能为空。")
         if not isinstance(arguments, dict):
             raise TencentChannelError("arguments 必须是 JSON object。")
+        if normalized in UNAVAILABLE_TOOLS:
+            raise TencentChannelError(
+                f"{normalized} 是网关幽灵工具（tools/list 可见但调用返回 130001），已被插件禁用。"
+            )
 
         await self._throttle()
 

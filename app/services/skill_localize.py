@@ -55,6 +55,9 @@ CORRECTION_RULES = """
 6. 翻页与参数坑保持原样但注明：get_feed_comments 的 channelSign 必须驼峰且
    pageSize<=20；get_search_guild_feed 的 searchType.type 必须为 0；
    get_guild_feeds 主键是 id 且 getType=2 常返回空。
+7. 字段名以 MCP schema 为准（feedId/guildIds/keyWord 等驼峰），
+   官方文档与 CLI 的 snake_case 不是 MCP 参数名；vector_search 是网关幽灵工具
+   （tools/list 可见但调用 130001），文档与示例一律不要引用它。
 """
 
 

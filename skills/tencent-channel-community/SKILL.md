@@ -32,7 +32,9 @@ version: 1.1.5
    只用 `get_notice_list` / `get_interact_notice` 按需拉取。
 4. **分享链接只有一个工具 `get_share_url`**（帖子与频道共用，参数区分）；
    `get_feed_share_url` / `get_guild_share_url` 不存在，调用会报 8011。
-5. 参数不确定先 `txcm_get_tool_schema`；不要编造参数值。
+5. **参数字段名一律以 `txcm_get_tool_schema` 返回为准**（驼峰，如 `feedId`/`guildIds`/
+   `keyWord`——注意 W 大写）；官方文档与 CLI 的 snake_case 不是 MCP 参数名。
+   参数不确定先查 schema，不要编造参数值。`vector_search` 在网关上不可用，不要调用。
 6. 错误处理：`8011`/`130001` api info not exist = 工具名或接口不存在（检查拼写）；
    `151` = 登录态失效（提示 `/txcm login`）；`153`/频率限制 = 等约 70 秒再试；
    `20047`/`130000`/`20006` = 需先加入频道。

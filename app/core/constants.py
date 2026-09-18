@@ -85,6 +85,8 @@ CONFIG_DEFAULTS = {
     "login_poll_payload_json": "{}",
 }
 
+# 网关幽灵工具：tools/list 会列出，但实际调用返回 130001，插件直接拦截。
+UNAVAILABLE_TOOLS = {"vector_search"}
 # 高风险操作：默认关闭，需要显式开启 enable_high_risk_tools（这些集合里的工具同时也在写操作集合中）。
 HIGH_RISK_TOOLS = {
     "del_feed",

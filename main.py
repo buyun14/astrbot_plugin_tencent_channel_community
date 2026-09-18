@@ -16,7 +16,7 @@ from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
 
 from . import channel_data as cdata
-from . import mcp_protocol, skill_source
+from . import mcp_protocol, skill_localize, skill_source
 from .cli_reference import CLI_COMMANDS, ENDPOINT_GUIDE
 from .constants import (
     CONFIG_DEFAULTS,
@@ -28,7 +28,7 @@ from .constants import (
 from .device_login import DeviceLoginMixin
 from .errors import TencentChannelError
 from .mcp_client import McpClientMixin
-from .skill_guide import SECTIONS, skill_guide_text
+from .skill_guide import skill_guide_text
 from .tools import TencentChannelFunctionTool
 from .tools.schema import (
     boolean_param,
@@ -203,26 +203,6 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                         ),
                     },
                     required=["tool_name", "arguments_json"],
-                ),
-                plugin=self,
-            ),
-            TencentChannelFunctionTool(
-                name="txcm_skill_topics",
-                description="列出可检索的腾讯频道官方 Skill 主题与插件踩坑附录主题。",
-                parameters=object_parameters({}),
-                plugin=self,
-            ),
-            TencentChannelFunctionTool(
-                name="txcm_skill_read",
-                description=(
-                    "按主题读取腾讯频道官方 Skill 内容（overview/feed/manage-guild/"
-                    "manage-member/notification）或插件踩坑附录（txcm- 前缀主题）。"
-                    "官方文档面向 CLI 命令，插件内用 txcm_call_cli_command 等价执行。"
-                    "先调 txcm_skill_topics 获取主题列表。"
-                ),
-                parameters=object_parameters(
-                    {"topic": string_param("主题名，来自 txcm_skill_topics。")},
-                    required=["topic"],
                 ),
                 plugin=self,
             ),
@@ -402,14 +382,14 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
             except TencentChannelError as exc:
                 payload["credential_probe"] = f"failed: {exc}"
         payload["skill_update"] = await self._check_skill_update()
+        payload["skill_update"]["localized_version"] = (
+            skill_localize.localized_skill_version(Path(__file__).resolve().parent)
+        )
         skill_cache = self._skill_cache_dir()
         if skill_cache is not None:
             manifest = skill_source.load_manifest(skill_cache)
-            payload["skill_update"]["cached_version"] = (
+            payload["skill_update"]["official_cached_version"] = (
                 manifest.get("version") if manifest else None
-            )
-            payload["skill_update"]["official_topics"] = sorted(
-                skill_source.official_topics(skill_cache)
             )
         return payload
 
@@ -915,40 +895,60 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
             cache_dir, session, proxy, force=force
         )
 
-    async def tool_skill_topics(self) -> str:
-        refresh = await self._ensure_skill_source()
-        cache_dir = self._skill_cache_dir()
-        official = skill_source.official_topics(cache_dir) if cache_dir else {}
-        return _json_dumps(
-            {
-                "official": [
-                    {"topic": topic, **meta} for topic, meta in official.items()
-                ],
-                "appendix": [f"txcm-{key}" for key in SECTIONS],
-                "cached_version": refresh.get("cached_version"),
-                "refresh_error": refresh.get("error"),
-            }
+    async def _localize_official_skill(self, *, force: bool = False) -> dict[str, Any]:
+        """下载官方 Skill 并调用模型本地化；任何失败保留现有技能。"""
+        refresh = await self._ensure_skill_source(force=force)
+        if refresh.get("error"):
+            return {**refresh, "stage": "download"}
+        official_version = str(
+            refresh.get("latest_version") or refresh.get("cached_version") or ""
         )
-
-    async def tool_skill_read(self, topic: str) -> str:
-        key = str(topic or "").strip()
-        if not key:
-            return "topic 不能为空。先调 txcm_skill_topics 获取主题列表。"
-        await self._ensure_skill_source()
+        if not official_version:
+            return {"error": "无法确定官方 Skill 版本", "stage": "download"}
+        plugin_dir = Path(__file__).resolve().parent
+        current = skill_localize.localized_skill_version(plugin_dir)
+        if not force and current == official_version:
+            return {
+                "skipped": "本地化技能已是该版本",
+                "localized_version": current,
+                "official_version": official_version,
+            }
         cache_dir = self._skill_cache_dir()
-        if cache_dir is not None and key in skill_source.OFFICIAL_TOPICS:
-            text = skill_source.read_official_topic(cache_dir, key)
-            if text:
-                return text
-        appendix_key = key[5:] if key.startswith("txcm-") else key
-        if appendix_key in SECTIONS:
-            return f"[来源: plugin appendix] {skill_guide_text(appendix_key)}"
-        if cache_dir is None:
-            return (
-                f"主题 {key} 暂不可用：官方 Skill 缓存不可用，"
-                "且不是内置附录主题。可用主题见 txcm_skill_topics。"
-            )
-        return f"未知主题 {key}。可用主题见 txcm_skill_topics。"
+        files = skill_source.official_files(cache_dir) if cache_dir else {}
+        if not files.get("SKILL.md"):
+            return {"error": "官方缓存缺少 SKILL.md", "stage": "download"}
+        provider_id = str(self._cfg("skill_localize_provider", "") or "").strip()
+        if provider_id:
+            provider = self.context.get_provider_by_id(provider_id)
+        else:
+            provider = await self.context.get_using_provider_async()
+        if provider is None:
+            return {
+                "error": "未配置可用的 LLM 供应商",
+                "stage": "localize",
+                "official_version": official_version,
+            }
+        mapping_rows = [
+            f"{command} -> {item.get('tool')}"
+            for command, item in CLI_COMMANDS.items()
+            if item.get("tool")
+        ]
+        prompt = skill_localize.build_localize_prompt(
+            files, official_version, mapping_rows
+        )
+        response = await provider.text_chat(
+            prompt=prompt,
+            system_prompt=skill_localize.SYSTEM_PROMPT,
+        )
+        payload = skill_localize.parse_localized_payload(
+            str(response.completion_text or "")
+        )
+        skill_localize.write_localized_skill(plugin_dir, payload)
+        return {
+            "localized_version": official_version,
+            "official_version": official_version,
+            "files": sorted(payload),
+        }
 
     async def tool_list_cli_commands(self, query: str = "") -> str:
         keyword = str(query or "").strip().lower()
@@ -1323,26 +1323,29 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         event: AstrMessageEvent,
         topic: GreedyStr = "",
     ) -> AsyncGenerator[MessageEventResult, None]:
-        """查看官方 Skill 与踩坑附录。"""
-        key = str(topic or "").strip()
-        if not key:
-            yield event.plain_result(await self.tool_skill_topics())
-            return
-        yield event.plain_result(await self.tool_skill_read(key))
+        """查看踩坑附录使用规则。"""
+        yield event.plain_result(skill_guide_text(str(topic or "")))
 
     @txcm.command("skill_update")
     async def txcm_skill_update(
         self,
         event: AstrMessageEvent,
     ) -> AsyncGenerator[MessageEventResult, None]:
-        """手动刷新官方 Skill 缓存。"""
-        refresh = await self._ensure_skill_source(force=True)
-        cached = refresh.get("cached_version") or "无"
-        if refresh.get("error"):
+        """拉取官方 Skill 并调用模型本地化为插件内置技能。"""
+        result = await self._localize_official_skill(force=True)
+        if result.get("error"):
             yield event.plain_result(
-                f"官方 Skill 更新失败：{refresh['error']}（缓存版本：{cached}）"
+                f"Skill 本地化失败（{result.get('stage') or 'unknown'}）：{result['error']}"
+                "；现有技能保持不变。"
+            )
+            return
+        if result.get("skipped"):
+            yield event.plain_result(
+                f"官方 Skill {result.get('official_version')} 未变化，本地化技能仍为"
+                f" {result.get('localized_version')}。"
             )
             return
         yield event.plain_result(
-            f"官方 Skill 缓存版本：{cached}（线上最新：{refresh.get('latest_version') or '未知'}）"
+            f"Skill 本地化完成：v{result.get('localized_version')}"
+            f"（{', '.join(result.get('files', []))}）"
         )

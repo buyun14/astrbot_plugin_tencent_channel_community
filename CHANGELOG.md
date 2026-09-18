@@ -10,8 +10,10 @@
 - `channel_data.py` / `mcp_protocol.py`：base64 与 protobuf 文本解析、字段归一化、凭据脱敏
 - 全局限速 `min_request_interval_ms`（默认 400ms）与数据缓存 `cache_ttl_seconds`（默认 300s）
 - CI：GitHub Actions（ruff==0.16.8 check / format --check + pytest）与 `ruff.toml` 规则集
-- 官方 Skill 动态接入：从腾讯官方分发点自动下载/更新（24h TTL + `/txcm skill_update` 手动，版本取 `x-cos-meta-tcc-version` 头），缓存于插件数据目录，失败回退内置附录
-- 官方 Skill 检索工具：`txcm_skill_topics` / `txcm_skill_read`（overview/feed/manage-guild/manage-member/notification + `txcm-` 前缀踩坑附录，结果标注来源与版本）
+- 插件内置本地化版官方 Skill（`skills/tencent-channel-community/`，AstrBot 原生技能体系自动索引）；
+  `/txcm skill_update` 拉取官方最新版（版本取 `x-cos-meta-tcc-version` 头）并调用模型重新本地化
+  （落实工具名/风险分级/平台差异修正），模型供应商经 `skill_localize_provider` 配置，留空用主 LLM；
+  下载或本地化失败保留现有技能，不影响使用
 
 ### 修复
 
@@ -24,7 +26,8 @@
 ### 变更
 
 - `main.py`（2692 行）按职责拆分为 `mcp_client` / `device_login` / `constants` / `cli_reference` / `skill_guide` / `errors`，行为等价（AST 逐函数比对）
-- `txcm_skill_guide` 拆分为 `txcm_skill_topics` + `txcm_skill_read`，数据源改为官方 Skill + 插件踩坑附录；`txcm_call_tool` / `txcm_call_cli_command` 描述注入鉴权要点
+- 官方用法经内置本地化技能下发，不再注册自定义读取工具；`/txcm guide` 聚焦插件踩坑附录；
+  `txcm_call_tool` / `txcm_call_cli_command` 描述注入鉴权要点
 - 配置项与指令用法保持兼容
 
 ## v0.3.0 (2026-08-18)

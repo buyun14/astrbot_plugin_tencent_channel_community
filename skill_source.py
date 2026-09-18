@@ -63,6 +63,24 @@ def official_topics(cache_dir: Path) -> dict[str, dict[str, str]]:
     }
 
 
+def official_files(cache_dir: Path) -> dict[str, str]:
+    """读取全部可用官方主题的完整内容，供本地化改写。"""
+    manifest = load_manifest(cache_dir)
+    if not manifest:
+        return {}
+    version_dir = cache_dir / str(manifest["version"])
+    files: dict[str, str] = {}
+    for rel in OFFICIAL_TOPICS.values():
+        path = version_dir / rel
+        if not path.is_file():
+            continue
+        try:
+            files[rel] = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return files
+
+
 def read_official_topic(
     cache_dir: Path, topic: str, limit: int = READ_CHAR_LIMIT
 ) -> str:

@@ -188,6 +188,7 @@ CLI_COMMANDS: dict[str, dict[str, Any]] = {
         "description": "查看我的腾讯频道列表",
     },
     "manage.get-user-info": {
+        "note": "上游实测常返回『请求失败，请稍后重试』，疑似需特定上下文；失败改用 guild_member_search 或 get_guild_member_list。",
         "tool": "get_user_info",
         "group": "query",
         "risk": "read",

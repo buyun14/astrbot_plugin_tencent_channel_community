@@ -793,6 +793,7 @@ def normalize_feed(raw: Any) -> dict[str, Any]:
     content = first_text(_lookup(raw, "content", "contents", "feedContent"))
     return {
         "feed_id": str(_lookup(raw, "id", "feedId", "feed_id") or ""),
+        "guild_id": str(_lookup(raw, *GUILD_ID_KEYS) or ""),
         "channel_id": _feed_channel_id(raw),
         "title": title.strip(),
         "content": content.strip(),

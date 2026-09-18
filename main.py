@@ -546,6 +546,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         channel_id = feed["channel_id"]
         return {
             "feed_id": feed["feed_id"],
+            "guild_id": feed.get("guild_id", ""),
             "channel_id": channel_id,
             # 版块名取不到时退回 channel_id，至少让模型知道帖子属于哪个版块
             "channel": channels.get(channel_id) or (channel_id if channel_id else ""),
@@ -628,7 +629,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
 
         实测约束（2026-09 验证）：
         - ``channelSign`` 必须带且为驼峰 ``guildId``/``channelId``，缺了会报"请求失败"；
-        - ``pageSize`` 必须 <= 20，传 30/50 会被网关拒绝；
+        - ``pageSize`` 默认 20；上限以 schema 为准（历史实测 30/50 曾被拒）。
         - 评论数组字段名是 ``vecComment``，正文是 base64 protobuf（由 channel_data 解码）。
         """
         arguments: dict[str, Any] = {"feedId": feed_id, "pageSize": 20}
@@ -746,9 +747,14 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                 except TencentChannelError as exc:
                     payload["note"] = f"频道解析失败：{exc}；"
                     guild_id = ""
+            channel_id = str(channel_id or "").strip()
+            if not guild_id:
+                guild_id = str((payload["feed"] or {}).get("guild_id") or "")
+            if not channel_id:
+                channel_id = str((payload["feed"] or {}).get("channel_id") or "")
             try:
                 payload["comments"] = await self._feed_comments(
-                    fid, guild_id=guild_id, channel_id=str(channel_id or "").strip()
+                    fid, guild_id=guild_id, channel_id=channel_id
                 )
             except TencentChannelError as exc:
                 payload["note"] += (

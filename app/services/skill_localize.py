@@ -53,7 +53,7 @@ CORRECTION_RULES = """
 5. 写操作与高风险操作受插件配置 enable_write_tools / enable_high_risk_tools
    限制且默认关闭：指引必须提示先让管理员开启，否则调用直接被拒。
 6. 翻页与参数坑保持原样但注明：get_feed_comments 的 channelSign 必须驼峰且
-   pageSize<=20；get_search_guild_feed 的 searchType.type 必须为 0；
+   pageSize 以 schema 为准（当前网关标最大 50；早期实测 30/50 曾被拒，拿不准先用小页）；get_search_guild_feed 的 searchType.type 必须为 0；
    get_guild_feeds 主键是 id 且 getType=2 常返回空。
 7. 字段名以 MCP schema 为准（feedId/guildIds/keyWord 等驼峰），
    官方文档与 CLI 的 snake_case 不是 MCP 参数名；vector_search 是网关幽灵工具

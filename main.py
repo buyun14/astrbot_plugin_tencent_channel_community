@@ -859,7 +859,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                 "count": 0,
                 "guilds": [],
                 "raw_guild_count": len(payload["guilds"]),
-                "note": "上游返回结构无法归一化，请用 txcm_call_tool 直接查看原始字段。",
+                "note": "列表为空：该账号可能尚未加入任何频道；若确认已加入，请 /txcm login 重新授权后重试，或用 txcm_call_tool 调 get_my_join_guild_info 查看原始返回。",
             }
         )
 

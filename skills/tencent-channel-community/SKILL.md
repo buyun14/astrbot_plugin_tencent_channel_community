@@ -39,7 +39,8 @@ version: 1.1.5
    `151` = 登录态失效（提示 `/txcm login`）；`153`/频率限制 = 等约 70 秒再试；
    `20047`/`130000`/`20006` = 需先加入频道。
 7. **参数坑**：`get_feed_comments` 的 `channelSign` 必须驼峰 `guildId`/`channelId` 且
-   `pageSize` ≤ 20；`get_search_guild_feed` 的 `searchType.type` 必须为 `0`（2 返回空）；
+   `pageSize` 以 schema 为准（当前网关标默认 20、最大 50；早期实测 30/50 曾被拒，
+   拿不准先用小页）；`get_search_guild_feed` 的 `searchType.type` 必须为 `0`（2 返回空）；
    `get_guild_feeds` 帖子主键是 `id` 且 `getType=2`（最新）常返回空；中文字段多为 base64，
    语义化工具已自动解码。
 

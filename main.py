@@ -457,7 +457,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         return ENDPOINT_GUIDE
 
     # ------------------------------------------------------------------ #
-    # 语义化只读工具（v0.4.0）：把 oidb 原语的坑（base64、位掩码、字段名不一致）
+    # 语义化只读工具：把 oidb 原语的坑（base64、位掩码、字段名不一致）
     # 全部收在插件内部，对外只给模型干净的字段。
     # ------------------------------------------------------------------ #
     async def _guilds_normalized(

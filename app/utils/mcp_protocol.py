@@ -26,8 +26,7 @@ TOKEN_QUERY_KEY = "token"
 REDACTED = "***"
 
 # 可重试：网关/oidb 层抖动、限流、网络问题。
-# 注意这些标记必须与 main.py 中 _post_json 实际抛出的中文文案对齐，
-# 否则重试策略会静默失效（曾经踩过：只写英文标记导致 429/超时从不重试）。
+# 标记必须与 _post_json 实际抛出的中文文案对齐，否则重试会静默失效。
 TRANSIENT_MCP_MARKERS = (
     "频率限制",
     "请求频率过高",

@@ -94,8 +94,6 @@ HIGH_RISK_TOOLS = {
     "kick_guild_member",
     "leave_guild",
     "modify_member_shut_up",
-    "do_comment",
-    "do_reply",
     "deal_notice",
 }
 

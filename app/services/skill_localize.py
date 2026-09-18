@@ -15,6 +15,13 @@ import re
 import shutil
 from pathlib import Path
 
+try:  # 运行时走 AstrBot 日志；单测环境无 astrbot 时退回标准 logging
+    from astrbot.api import logger
+except ImportError:
+    import logging
+
+    logger = logging.getLogger(__name__)
+
 SKILL_DIR_NAME = "tencent-channel-community"
 SKILL_VERSION_KEY = "version"
 
@@ -41,8 +48,8 @@ SYSTEM_PROMPT = (
 # 本地化必须落实的修正（来自对真实网关与工具清单的核对）
 CORRECTION_RULES = """
 1. 风险分级：modify_member_shut_up 与 del_feed / delete_channel / kick_guild_member /
-   do_comment(type=0/2 删除) / do_reply(type=0/2 删除) / change_role_member(remove-admin) /
-   leave_guild / deal_notice 同级，都是高风险操作，必须统一标注为高风险并提示先确认。
+   change_role_member(remove-admin) / leave_guild / deal_notice 同级，标注为高风险；
+   do_comment / do_reply 仅删除类（type=0/2）按高风险标注，发表类（type=1）按写操作。
 2. 分享链接只有一个 MCP 工具 get_share_url（帖子与频道共用，参数区分）；
    文档若出现 get_feed_share_url / get_guild_share_url 一律改为 get_share_url。
 3. 工具名一律用 MCP 工具名（如 get_share_url、get_feed_comments），
@@ -53,7 +60,8 @@ CORRECTION_RULES = """
 5. 写操作与高风险操作受插件配置 enable_write_tools / enable_high_risk_tools
    限制且默认关闭：指引必须提示先让管理员开启，否则调用直接被拒。
 6. 翻页与参数坑保持原样但注明：get_feed_comments 的 channelSign 必须驼峰且
-   pageSize 以 schema 为准（当前网关标最大 50；早期实测 30/50 曾被拒，拿不准先用小页）；get_search_guild_feed 的 searchType.type 必须为 0；
+   pageSize 以 schema 为准（当前网关标最大 50；早期实测 30/50 曾被拒，拿不准先用小页）；
+   get_search_guild_feed 的 searchType.type 必须为 0；
    get_guild_feeds 主键是 id 且 getType=2 常返回空。
 7. 字段名以 MCP schema 为准（feedId/guildIds/keyWord 等驼峰），
    官方文档与 CLI 的 snake_case 不是 MCP 参数名；vector_search 是网关幽灵工具
@@ -107,6 +115,9 @@ def parse_localized_payload(text: str) -> dict[str, str]:
 
 def write_localized_skill(plugin_dir: Path, payload: dict[str, str]) -> Path:
     """把本地化结果写入插件自带技能目录（先写临时目录再整体替换）。"""
+    logger.debug(
+        f"[txcm] 写入本地化技能：{sorted(payload)} → {plugin_dir / 'skills' / SKILL_DIR_NAME}"
+    )
     skill_dir = plugin_dir / "skills" / SKILL_DIR_NAME
     tmp_dir = plugin_dir / "skills" / f".{SKILL_DIR_NAME}.tmp"
     if tmp_dir.exists():

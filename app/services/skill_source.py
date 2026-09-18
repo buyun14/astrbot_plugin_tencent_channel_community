@@ -22,6 +22,13 @@ from typing import Any
 
 import aiohttp
 
+try:  # 运行时走 AstrBot 日志；单测环境无 astrbot 时退回标准 logging
+    from astrbot.api import logger
+except ImportError:
+    import logging
+
+    logger = logging.getLogger(__name__)
+
 from ..core.constants import SKILL_UPDATE_CHECK_URL
 
 CHECK_TTL_SECONDS = 24 * 3600
@@ -186,6 +193,10 @@ async def refresh_skill_cache(
             result["error"] = "响应缺少 x-cos-meta-tcc-version 头"
             return result
         result["latest_version"] = latest
+        logger.debug(
+            f"[txcm] 官方 Skill 版本检测：latest={latest} "
+            f"cached={manifest.get('version') if manifest else None} force={force}"
+        )
         if manifest and not force and latest == manifest.get("version"):
             manifest["fetched_at"] = int(time.time())
             manifest_path(cache_dir).write_text(
@@ -204,6 +215,7 @@ async def refresh_skill_cache(
             result["error"] = f"下载失败 HTTP {response.status}"
             return result
         manifest = extract_skill_zip(data, cache_dir, latest, cli_version)
+        logger.debug(f"[txcm] 官方 Skill 已下载解包：v{latest} bytes={len(data)}")
         result["cached_version"] = manifest["version"]
         result["updated"] = True
     except Exception as exc:  # 离线/坏包兜底：保留旧缓存，错误交给调用方降级

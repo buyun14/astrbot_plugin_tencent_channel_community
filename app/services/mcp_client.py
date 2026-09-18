@@ -101,6 +101,12 @@ class McpClientMixin:
         proxy = str(self._cfg("proxy", "") or "").strip() or None
         token = self._token()
         try:
+            started = time.perf_counter()
+            logger.debug(
+                f"[txcm] POST {mcp_protocol.redact_token(str(url), token)} "
+                f"bytes={len(json.dumps(payload, ensure_ascii=False))} "
+                f"auth={'Authorization' in (headers or {})}"
+            )
             async with session.post(
                 url,
                 json=payload,
@@ -109,6 +115,11 @@ class McpClientMixin:
                 timeout=self._timeout(),
             ) as response:
                 text = await response.text()
+                logger.debug(
+                    f"[txcm] POST {mcp_protocol.redact_token(str(url), token)} -> "
+                    f"HTTP {response.status} "
+                    f"{int((time.perf_counter() - started) * 1000)}ms chars={len(text)}"
+                )
                 if response.status >= 400:
                     if response.status in {401, 403}:
                         message = "腾讯频道鉴权失败，请检查 QQ AI Connect Token 或重新 /txcm login。"
@@ -191,6 +202,7 @@ class McpClientMixin:
             if interval > 0:
                 wait = self._last_call_at + interval - time.monotonic()
                 if wait > 0:
+                    logger.debug(f"[txcm] 全局限速：等待 {wait * 1000:.0f}ms 后发请求")
                     await asyncio.sleep(wait)
             self._last_call_at = time.monotonic()
 
@@ -349,6 +361,7 @@ class McpClientMixin:
                     raise TencentChannelError(
                         f"{last_detail}。重试 {attempt} 次后仍失败，请稍后再试。", data
                     )
+            logger.debug(f"[{PLUGIN_NAME}] MCP {method} 成功（第 {attempt} 次尝试）")
             return data
 
         raise TencentChannelError(
@@ -357,6 +370,7 @@ class McpClientMixin:
 
     async def _initialize_mcp(self) -> dict[str, Any]:
         if self._server_info:
+            logger.debug(f"[{PLUGIN_NAME}] MCP initialize 复用缓存")
             return self._server_info
 
         response = await self._mcp_request(
@@ -380,6 +394,9 @@ class McpClientMixin:
             and not force
             and self._cfg("cache_tool_schema")
         ):
+            logger.debug(
+                f"[txcm] tools/list 命中缓存（{len(self._tool_cache)} 个工具）"
+            )
             return self._tool_cache
 
         await self._initialize_mcp()
@@ -503,6 +520,10 @@ class McpClientMixin:
             raise TencentChannelError("工具名不能为空。")
         if not isinstance(arguments, dict):
             raise TencentChannelError("arguments 必须是 JSON object。")
+        logger.debug(
+            f"[txcm] call_mcp_tool: {normalized} bypass={bypass_risk_gate} "
+            f"args_keys={sorted((arguments or {}).keys())}"
+        )
         if normalized in UNAVAILABLE_TOOLS:
             raise TencentChannelError(
                 f"{normalized} 是网关幽灵工具（tools/list 可见但调用返回 130001），已被插件禁用。"
@@ -521,7 +542,18 @@ class McpClientMixin:
                 raise TencentChannelError(
                     f"{normalized} 属于写操作，请在插件配置中启用写操作工具后再调用。"
                 )
-
+            if normalized in {"do_comment", "do_reply"}:
+                # 删除类（type=0/2）按高风险判定，发表类（type=1）只走写开关
+                type_key = "commentType" if normalized == "do_comment" else "replyType"
+                try:
+                    action_type = int(arguments.get(type_key))
+                except (TypeError, ValueError):
+                    action_type = 1
+                if action_type in (0, 2) and not self._cfg("enable_high_risk_tools"):
+                    raise TencentChannelError(
+                        f"{normalized} 的 {type_key}=0/2 是删除操作，属高风险；"
+                        "请开启 enable_high_risk_tools 后重试。"
+                    )
         try:
             response = await self._mcp_request(
                 "tools/call",

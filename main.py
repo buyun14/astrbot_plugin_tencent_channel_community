@@ -157,7 +157,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                 name="txcm_read_feed",
                 description=(
                     "读某条帖子的详情和评论（评论正文会自动解码）。"
-                    "要看评论必须提供 channel_id（可用 txcm_search_feeds / txcm_latest_feeds 得到）。"
+                    "评论默认自动回填；特殊情况下可显式提供 guild / channel_id。"
                 ),
                 parameters=object_parameters(
                     {
@@ -483,6 +483,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         """把频道 id / 频道号 / 名称片段解析成归一化频道信息。"""
         key = str(reference or "").strip()
         guilds = await self._guilds_normalized()
+        logger.debug(f"[txcm] 解析频道引用：缓存频道数={len(guilds)}")
         if not guilds:
             raise TencentChannelError(
                 "上游返回成功但未解析到频道：该账号可能尚未加入任何频道。"
@@ -907,9 +908,10 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
             return {"error": "无法定位插件数据目录，官方 Skill 缓存不可用"}
         session = await self._get_session()
         proxy = str(self._cfg("proxy", "") or "").strip() or None
-        return await skill_source.refresh_skill_cache(
+        refresh = await skill_source.refresh_skill_cache(
             cache_dir, session, proxy, force=force
         )
+        logger.debug(f"[txcm] 官方 Skill 缓存刷新结果：{refresh}")
 
     async def _localize_official_skill(self, *, force: bool = False) -> dict[str, Any]:
         """下载官方 Skill 并调用模型本地化；任何失败保留现有技能。"""
@@ -952,6 +954,11 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
         prompt = skill_localize.build_localize_prompt(
             files, official_version, mapping_rows
         )
+        logger.debug(
+            f"[txcm] Skill 本地化：provider={'自定义' if provider_id else '主 LLM'} "
+            f"official=v{official_version} prompt_chars={len(prompt)} "
+            f"official_files={sorted(files)}"
+        )
         response = await provider.text_chat(
             prompt=prompt,
             system_prompt=skill_localize.SYSTEM_PROMPT,
@@ -960,6 +967,7 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
             str(response.completion_text or "")
         )
         skill_localize.write_localized_skill(plugin_dir, payload)
+        logger.debug(f"[txcm] Skill 本地化写盘完成：{sorted(payload)}")
         return {
             "localized_version": official_version,
             "official_version": official_version,

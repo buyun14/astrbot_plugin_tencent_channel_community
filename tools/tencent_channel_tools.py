@@ -11,6 +11,7 @@ class TencentChannelFunctionTool(FunctionTool):
     plugin: Any = None
 
     async def call(self, context, **kwargs) -> ToolExecResult:
+        logger.debug(f"[txcm] LLM 工具调用：{self.name} args_keys={sorted(kwargs)}")
         if self.plugin is None:
             return json.dumps(
                 {

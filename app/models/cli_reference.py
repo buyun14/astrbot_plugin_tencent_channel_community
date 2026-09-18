@@ -411,7 +411,7 @@ CLI_COMMANDS: dict[str, dict[str, Any]] = {
     "manage.deal-notice": {
         "tool": "deal_notice",
         "group": "write",
-        "risk": "write",
+        "risk": "high-risk-write",
         "description": "处理系统通知",
     },
     "manage.notify-daemon": {

@@ -39,6 +39,8 @@ class TencentChannelFunctionTool(FunctionTool):
                 return await self.plugin.tool_latest_feeds(**kwargs)
             if self.name == "txcm_read_feed":
                 return await self.plugin.tool_read_feed(**kwargs)
+            if self.name == "txcm_do_comment":
+                return await self.plugin.tool_do_comment(**kwargs)
             if self.name == "txcm_ask_channel":
                 return await self.plugin.tool_ask_channel(**kwargs)
             if self.name == "txcm_call_tool":

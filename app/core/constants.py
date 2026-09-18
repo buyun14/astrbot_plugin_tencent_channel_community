@@ -36,6 +36,7 @@ TXCM_LLM_TOOL_NAMES = (
     "txcm_search_feeds",
     "txcm_latest_feeds",
     "txcm_read_feed",
+    "txcm_do_comment",
     "txcm_ask_channel",
     "txcm_call_tool",
     "txcm_list_cli_commands",

@@ -173,6 +173,25 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                 plugin=self,
             ),
             TencentChannelFunctionTool(
+                name="txcm_do_comment",
+                description=(
+                    "给指定帖子发表评论（type=1）。自动获取原帖 StFeed 并组装请求，"
+                    "content 传纯文本即可（插件自动 base64）；poster_tinyid 可选，"
+                    "未填则省略评论人信息。删除评论（type=0/2）属高风险，不在本工具用途内。"
+                ),
+                parameters=object_parameters(
+                    {
+                        "feed_id": string_param("目标帖子 id。"),
+                        "content": string_param("评论正文，纯文本。"),
+                        "poster_tinyid": string_param(
+                            "可选。评论人 tinyid（>10 位数字），一般可不填。"
+                        ),
+                    },
+                    required=["feed_id", "content"],
+                ),
+                plugin=self,
+            ),
+            TencentChannelFunctionTool(
                 name="txcm_ask_channel",
                 description=(
                     "在频道里问一个问题：自动搜索相关帖子 → 读评论 → 按相关度排序，"
@@ -763,6 +782,43 @@ class TencentChannelCommunityPlugin(McpClientMixin, DeviceLoginMixin, Star):
                     "拿到 channel_id 后重试（评论接口需要 channelSign）。"
                 )
         return _json_dumps(payload, 16000)
+
+    async def tool_do_comment(
+        self,
+        feed_id: str,
+        content: str,
+        poster_tinyid: str = "",
+        comment_type: int = 1,
+    ) -> str:
+        """发表评论：自动取原帖 StFeed 透传，content 自动 base64。"""
+        fid = str(feed_id or "").strip()
+        text = str(content or "").strip()
+        if not fid:
+            raise TencentChannelError("feed_id 不能为空。")
+        if not text:
+            raise TencentChannelError("content 不能为空。")
+
+        detail = await self.call_mcp_tool("get_feed_detail", {"feedId": fid})
+        raw_feeds = cdata.extract_feeds(self._tool_payload(detail))
+        if not raw_feeds:
+            raise TencentChannelError("未取到原帖数据，无法安全发表评论；请稍后重试。")
+
+        comment: dict[str, Any] = {
+            "content": base64.b64encode(text.encode("utf-8")).decode("ascii")
+        }
+        tinyid = str(poster_tinyid or "").strip()
+        if tinyid:
+            comment["postUser"] = {"id": tinyid}
+
+        result = await self.call_mcp_tool(
+            "do_comment",
+            {
+                "commentType": int(comment_type),
+                "feed": raw_feeds[0],
+                "comment": comment,
+            },
+        )
+        return _json_dumps(result, 8000)
 
     async def tool_ask_channel(self, guild: str, question: str, limit: int = 5) -> str:
         """组合动作：搜帖子 → 读评论 → 按相关度排序，带出处返回回答素材。"""
